@@ -2,8 +2,8 @@ import {editor, type IPosition, type IRange} from "monaco-editor/esm/vs/editor/e
 
 type ICodeEditor = editor.ICodeEditor;
 
-const OPTION_FontSize = 52
-const OPTION_LineHeight = 67
+const OPTION_FontSize_FALLBACK = 52
+const OPTION_LineHeight_FALLBACK = 67
 
 const DEFAULT_SELECTION_SYNC_TIMEOUT = 300
 const DBLCLICK_OPEN_MENU_TIMEOUT = 1000
@@ -126,6 +126,11 @@ export const editorTouchSelectionHelp = (
     if (!editor) {
         throw new Error("editor not existed")
     }
+
+    // Resolve EditorOption enum values at call time (Monaco must be loaded by now)
+    const _EditorOption = (globalThis as any).monaco?.editor?.EditorOption
+    const OPTION_FontSize: number = _EditorOption?.fontSize ?? OPTION_FontSize_FALLBACK
+    const OPTION_LineHeight: number = _EditorOption?.lineHeight ?? OPTION_LineHeight_FALLBACK
 
     const element = editor.getDomNode()
     if (!element || !(element instanceof HTMLElement)) {
@@ -370,19 +375,19 @@ export const editorTouchSelectionHelp = (
         const syncSelectorStyle = (lineHeight: number) => {
             if (leftSelector) {
                 leftSelector.textCursor.style.height = `${lineHeight}px`
-                leftSelector.bottomCursor.style.marginTop = `${lineHeight}px`
+                leftSelector.bottomCursor.style.top = `${lineHeight}px`
+                leftSelector.bottomCursor.style.marginTop = '0'
             }
             if (rightSelector) {
                 rightSelector.textCursor.style.height = `${lineHeight}px`
-                rightSelector.bottomCursor.style.marginTop = `${lineHeight}px`
+                rightSelector.bottomCursor.style.top = `${lineHeight}px`
+                rightSelector.bottomCursor.style.marginTop = '0'
             }
         }
         syncSelectorStyle(lineHeight)
         editor.onDidChangeConfiguration((e) => {
-            if (e.hasChanged(OPTION_LineHeight)) {
-                lineHeight = editor.getOption(OPTION_LineHeight)
-                syncSelectorStyle(lineHeight)
-            }
+            lineHeight = editor.getOption(OPTION_LineHeight)
+            syncSelectorStyle(lineHeight)
             if (e.hasChanged(OPTION_FontSize)) {
                 fontSize = editor.getOption(OPTION_FontSize)
             }
@@ -461,10 +466,25 @@ export const editorTouchSelectionHelp = (
 
                 const selectionIsEmpty = initialSelection.isEmpty()
 
+                // Calculate offset between cursor visual position and touch point
+                // so the cursor tracks the teardrop handle, not the raw finger position.
+                // Extra lineHeight*2.5 offset lifts cursor above finger on real touch devices.
+                let touchOffsetY = 0
+                try {
+                    const anchorPos = selector.classList.contains('left')
+                        ? {lineNumber: initialSelection.startLineNumber, column: initialSelection.startColumn}
+                        : {lineNumber: initialSelection.endLineNumber, column: initialSelection.endColumn}
+                    const scrolledPos = editor.getScrolledVisiblePosition(anchorPos)
+                    if (scrolledPos) {
+                        const editorRect = element.getBoundingClientRect()
+                        touchOffsetY = editorRect.top + scrolledPos.top + scrolledPos.height / 2 - touch.clientY
+                    }
+                } catch (_e) { /* ignore */ }
+
                 let revealTimer = setInterval(() => {
                     scrollTopExtremityFit(editor, touch, lineHeight)
                     scrollLeftExtremityFit(editor, touch, fontSize)
-                    const target = editor.getTargetAtClientPoint(touch.clientX, touch.clientY - lineHeight / 2)
+                    const target = editor.getTargetAtClientPoint(touch.clientX, touch.clientY + touchOffsetY - lineHeight * 1.5)
                     if (target && target.position) {
                         if (selectionIsEmpty) {
                             editor.setPosition(target.position)
