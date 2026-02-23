@@ -481,34 +481,45 @@ export const editorTouchSelectionHelp = (
                     }
                 } catch (_e) { /* ignore */ }
 
-                let revealTimer = setInterval(() => {
-                    scrollTopExtremityFit(editor, touch, lineHeight)
-                    scrollLeftExtremityFit(editor, touch, fontSize)
-                    const target = editor.getTargetAtClientPoint(touch.clientX, touch.clientY + touchOffsetY - lineHeight * 1.5)
-                    if (target && target.position) {
-                        if (selectionIsEmpty) {
-                            editor.setPosition(target.position)
-                        } else {
-                            editor.setSelection(updateSelection(initialSelection, target.position))
+                // Don't start the drag interval until the finger actually moves.
+                // This lets taps and long-presses work without the interval
+                // immediately repositioning the cursor.
+                let revealTimer: ReturnType<typeof setInterval> | null = null
+                const startRevealTimer = () => {
+                    if (revealTimer !== null) return
+                    revealTimer = setInterval(() => {
+                        scrollTopExtremityFit(editor, touch, lineHeight)
+                        scrollLeftExtremityFit(editor, touch, fontSize)
+                        const target = editor.getTargetAtClientPoint(touch.clientX, touch.clientY + touchOffsetY - lineHeight * 1.5)
+                        if (target && target.position) {
+                            if (selectionIsEmpty) {
+                                editor.setPosition(target.position)
+                            } else {
+                                editor.setSelection(updateSelection(initialSelection, target.position))
+                            }
                         }
-                    }
-                }, REVEAL_INTERVAL)
+                    }, REVEAL_INTERVAL)
+                }
 
                 const handleMove = (event: TouchEvent) => {
                     event.preventDefault()
                     touch = event.changedTouches[0] ?? event.touches[0]
+                    startRevealTimer()
                 }
 
                 const handleEnd = (event: TouchEvent) => {
-                    clearTimeout(revealTimer)
+                    if (revealTimer !== null) clearInterval(revealTimer)
+                    revealTimer = null
 
                     if (Date.now() - touchStartTime > OPEN_MENU_TIMEOUT) {
+                        document.removeEventListener('touchmove', handleMove)
+                        document.removeEventListener('touchend', handleEnd)
+                        document.removeEventListener('touchcancel', handleEnd)
                         return
                     }
 
                     event.preventDefault()
                     touch = event.changedTouches[0] ?? event.touches[0]
-                    handleMove(event)
 
                     if (selectorMenu && editor.getSelection() !== null) {
                         showSelectionMenuByTouch(touch)
