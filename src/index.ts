@@ -20,7 +20,11 @@ export enum DefaultToolName {
     Copy = 'copy',
     Cut = 'cut',
     Paste = 'paste',
+    SelectWord = 'selectWord',
     SelectAll = 'selectAll',
+    Hover = 'hover',
+    Find = 'find',
+    ReadOnly = 'readOnly',
     Undo = 'undo',
     Redo = 'redo',
     Close = 'close',
@@ -168,8 +172,18 @@ export const editorTouchSelectionHelp = (
 
     let selectorMenuShow = false
     let selectorMenu: HTMLDivElement | null = null
+    // Track menu items with dynamic (function) innerHTML for refresh on show.
+    const _dynamicMenuItems: { el: HTMLDivElement, fn: () => string | Element }[] = []
+    // Suppress auto-hide during right-click menu flow.
+    let _menuGuard = false
     const showSelectorMenu = () => {
         if (!selectorMenu) return
+        // Refresh dynamic icons (e.g. readOnly toggle color).
+        for (const d of _dynamicMenuItems) {
+            const r = d.fn()
+            d.el.innerHTML = typeof r === 'string' ? r : ''
+            if (typeof r !== 'string') d.el.appendChild(r)
+        }
         if (selectorMenuShow) return
         selectorMenuShow = true
         selectorMenu.classList.add('show')
@@ -177,6 +191,7 @@ export const editorTouchSelectionHelp = (
     const hideSelectorMenu = () => {
         if (!selectorMenu) return
         if (!selectorMenuShow) return
+        if (_menuGuard) return
         selectorMenuShow = false
         selectorMenu.classList.remove('show')
     }
@@ -691,6 +706,37 @@ export const editorTouchSelectionHelp = (
                     showSelectorMenu()
                 }
             }],
+            [DefaultToolName.SelectWord, {
+                name: 'select',
+                innerHTML: `
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    class="icon"
+    viewBox="0 0 24 24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    style="fill: none;"
+>
+    <path d="M5 3h2m4 0h2m4 0h2M3 7v2m18-2v2M3 13v2m18-2v2M5 21h2m4 0h2m4 0h2"/>
+</svg>`,
+                action: () => {
+                    const sel = editor.getSelection()
+                    if (!sel) return
+                    const model = editor.getModel()
+                    if (!model) return
+                    const word = model.getWordAtPosition(sel.getStartPosition())
+                    if (word) {
+                        editor.setSelection({
+                            startLineNumber: sel.startLineNumber,
+                            startColumn: word.startColumn,
+                            endLineNumber: sel.endLineNumber,
+                            endColumn: word.endColumn,
+                        })
+                        setTimeout(() => { editor.focus() })
+                    }
+                    showSelectorMenu()
+                }
+            }],
             [DefaultToolName.SelectAll, {
                 name: 'select all',
                 innerHTML: `
@@ -706,6 +752,54 @@ export const editorTouchSelectionHelp = (
 </svg>`,
                 action: () => {
                     selectAll()
+                    showSelectorMenu()
+                }
+            }],
+            [DefaultToolName.Hover, {
+                name: 'hover',
+                innerHTML: `<span class="icon" style="font-size: 1.2em; line-height: 1;">🚁</span>`,
+                action: () => {
+                    hideSelectorMenu()
+                    const sel = editor.getSelection()
+                    if (sel && sel.getStartPosition) {
+                        try { editor.setPosition(sel.getStartPosition()) } catch (_) {}
+                    }
+                    const hoverAction = editor.getAction('editor.action.showHover')
+                    if (hoverAction) {
+                        hoverAction.run()
+                    } else {
+                        editor.trigger('touch', 'editor.action.showHover', null)
+                    }
+                    return true
+                }
+            }],
+            [DefaultToolName.Find, {
+                name: 'find',
+                innerHTML: `<span class="icon" style="font-size: 1.2em; line-height: 1;">🔎</span>`,
+                action: () => {
+                    hideSelectorMenu()
+                    const act = editor.getAction('actions.find')
+                    if (act && act.run) { act.run() }
+                    else { editor.trigger('touch-menu', 'actions.find', null) }
+                }
+            }],
+            [DefaultToolName.ReadOnly, {
+                name: 'read only',
+                innerHTML: () => {
+                    const ro = editor.getOption(_EditorOption?.readOnly ?? 89)
+                    return `<svg xmlns="http://www.w3.org/2000/svg" class="icon" viewBox="0 0 100 100" style="fill: ${ro ? '#4fc3f7' : 'currentColor'}; stroke: none;"><path d="M84.4,24.3H38l7,7h39.4c0.8,0,1.5,0.7,1.5,1.5v38.5c0,0.2-0.1,0.5-0.2,0.7l5,5c1.4-1.5,2.2-3.5,2.2-5.6V32.8C92.9,28.2,89.1,24.3,84.4,24.3z"/><path d="M66.9,53.3c0,1.9,1.6,3.5,3.5,3.5h4.4c1.9,0,3.5-1.6,3.5-3.5c0-1.9-1.6-3.5-3.5-3.5h-4.4C68.5,49.8,66.9,51.3,66.9,53.3z"/><path d="M34.2,53.3c0-1.9-1.6-3.5-3.5-3.5h-4.4c-1.9,0-3.5,1.6-3.5,3.5s1.6,3.5,3.5,3.5h4.4C32.7,56.8,34.2,55.2,34.2,53.3z"/><path d="M60.4,45.5c1.9,0,3.5-1.6,3.5-3.5s-1.6-3.5-3.5-3.5H56c-1.1,0-2,0.5-2.6,1.2l5.8,5.8H60.4z"/><path d="M74.8,45.5c1.9,0,3.5-1.6,3.5-3.5c0-1.9-1.6-3.5-3.5-3.5h-4.4c-1.9,0-3.5,1.6-3.5,3.5c0,1.9,1.6,3.5,3.5,3.5H74.8z"/><path d="M26.3,45.5h4.4c1.9,0,3.5-1.6,3.5-3.5c0-1.9-1.6-3.5-3.5-3.5h-4.4c-1.9,0-3.5,1.6-3.5,3.5C22.8,43.9,24.4,45.5,26.3,45.5z"/><path d="M85.2,81.3l-8.4-8.4L70.8,67l0,0c0,0,0,0,0,0l-5.6-5.6l-4.6-4.6l0,0l-6.4-6.4l-6-6v0L23.3,19.5v0l-1.8-1.8c-1.4-1.4-3.6-1.4-4.9,0c-1.4,1.4-1.4,3.6,0,4.9l1.7,1.7h-1.5c-4.7,0-8.5,3.8-8.5,8.5v38.5c0,4.7,3.8,8.5,8.5,8.5h57l6.4,6.4c0.7,0.7,1.6,1,2.5,1c0.9,0,1.8-0.3,2.5-1c1.2-1.2,1.3-3,0.5-4.4C85.5,81.7,85.3,81.5,85.2,81.3z M16.8,72.8c-0.8,0-1.5-0.7-1.5-1.5V32.8c0-0.8,0.7-1.5,1.5-1.5h8.5l18.4,18.4l0,0h-2.6c-1.9,0-3.5,1.6-3.5,3.5s1.6,3.5,3.5,3.5h4.4c1.4,0,2.6-0.8,3.2-2l6.6,6.6H33.1c-1.9,0-3.5,1.6-3.5,3.5c0,1.9,1.6,3.5,3.5,3.5h29.3l4.5,4.5H16.8z"/></svg>`
+                },
+                action: () => {
+                    const ro = editor.getOption(_EditorOption?.readOnly ?? 89)
+                    editor.updateOptions({ readOnly: !ro })
+                    if (ro) {
+                        // Toggling OFF readOnly — blur so user taps to refocus with keyboard.
+                        try {
+                            const dom = editor.getDomNode()
+                            const ta = dom?.querySelector('textarea.inputarea') as HTMLElement ?? dom?.querySelector('textarea') as HTMLElement
+                            if (ta) ta.blur()
+                        } catch (_) {}
+                    }
                     showSelectorMenu()
                 }
             }],
@@ -763,18 +857,21 @@ export const editorTouchSelectionHelp = (
                 const result = menuTool.innerHTML()
                 if (typeof result === 'string') menuItemElement.innerHTML = result
                 else menuItemElement.appendChild(result)
+                _dynamicMenuItems.push({ el: menuItemElement, fn: menuTool.innerHTML })
             } else {
                 if (typeof menuTool.innerHTML === 'string') menuItemElement.innerHTML = menuTool.innerHTML
                 else menuItemElement.appendChild(menuTool.innerHTML)
             }
 
-            menuItemElement.addEventListener('touchend', async () => {
+            const runAction = async () => {
                 try {
                     await menuTool.action()
                 } catch (e) {
                     await toolActionErrorHandler(menuTool.name, e)
                 }
-            })
+            }
+            menuItemElement.addEventListener('touchend', runAction)
+            menuItemElement.addEventListener('click', runAction)
 
             selectorMenu.appendChild(menuItemElement)
         }
@@ -791,6 +888,19 @@ export const editorTouchSelectionHelp = (
             event.preventDefault()
         }, {passive: false})
 
+        // Prevent mousedown on menu from blurring the editor widget.
+        selectorMenu.addEventListener('mousedown', (event) => {
+            event.preventDefault()
+        })
+
+        // Click outside menu dismisses it.
+        document.addEventListener('mousedown', (event) => {
+            if (!selectorMenuShow || !selectorMenu) return
+            if (selectorMenu.contains(event.target as Node)) return
+            selectorMenuShow = false
+            selectorMenu.classList.remove('show')
+        })
+
         document.documentElement.append(selectorMenu)
     }
     initSelectorMenu()
@@ -806,5 +916,51 @@ export const editorTouchSelectionHelp = (
 
     element.addEventListener('click', (event) => {
         event.stopPropagation()
+    })
+
+    // Right-click (mouse) opens the selector menu at the cursor position.
+    element.addEventListener('contextmenu', (event: MouseEvent) => {
+        event.preventDefault()
+        event.stopPropagation()
+        if (!selectorMenu) return
+
+        // Guard: prevent onDidChangeCursorSelection / onDidBlurEditorWidget from
+        // immediately hiding the menu we're about to show.
+        _menuGuard = true
+
+        // Only move cursor if there's no active selection (don't clobber selection).
+        const sel = editor.getSelection()
+        const hasSelection = sel && !sel.isEmpty()
+        if (!hasSelection) {
+            const target = editor.getTargetAtClientPoint(event.clientX, event.clientY)
+            if (target && target.position) {
+                editor.setPosition(target.position)
+            }
+        }
+
+        showSelectorMenu()
+        const elementRect = element.getBoundingClientRect()
+        const menuRect = selectorMenu.getBoundingClientRect()
+
+        let x = event.clientX - menuRect.width / 2
+        if (x + menuRect.width > elementRect.width + elementRect.left) x = elementRect.width + elementRect.left - menuRect.width
+        if (x < 0) x = 0
+
+        let y = event.clientY - menuRect.height - 10
+        if (y < 0) y = event.clientY + 10
+
+        if (window.visualViewport) {
+            const maxX = window.visualViewport.width + window.visualViewport.offsetLeft - menuRect.width
+            const maxY = window.visualViewport.height + window.visualViewport.offsetTop - menuRect.height
+            if (x < window.visualViewport.offsetLeft) x = window.visualViewport.offsetLeft
+            else if (x > maxX) x = maxX
+            if (y < window.visualViewport.offsetTop) y = window.visualViewport.offsetTop
+            else if (y > maxY) y = maxY
+        }
+
+        selectorMenu.style.transform = `translateX(${x}px) translateY(${y}px)`
+
+        // Release guard after current event loop so blur/selection handlers don't fire.
+        setTimeout(() => { _menuGuard = false }, 0)
     })
 }
