@@ -8,7 +8,6 @@ const OPTION_LineHeight_FALLBACK = 67
 const DEFAULT_SELECTION_SYNC_TIMEOUT = 300
 const DBLCLICK_OPEN_MENU_TIMEOUT = 1000
 const REVEAL_INTERVAL = 50
-const OPEN_MENU_TIMEOUT = 100
 
 export type SelectorMenuTool = {
     name: string,
@@ -22,6 +21,8 @@ export enum DefaultToolName {
     Paste = 'paste',
     SelectWord = 'selectWord',
     SelectAll = 'selectAll',
+    GrowSelectionLeft = 'growSelectionLeft',
+    GrowSelectionRight = 'growSelectionRight',
     Hover = 'hover',
     Find = 'find',
     Mention = 'mention',
@@ -173,12 +174,26 @@ export const editorTouchSelectionHelp = (
 
     let selectorMenuShow = false
     let selectorMenu: HTMLDivElement | null = null
+    let selectorAdjustmentMenu: HTMLDivElement | null = null
     // Track menu items with dynamic (function) innerHTML for refresh on show.
     const _dynamicMenuItems: { el: HTMLDivElement, fn: () => string | Element }[] = []
-    // Suppress auto-hide during right-click menu flow.
+    // Suppress auto-hide while a right-click or touch-handle flow opens the menus.
     let _menuGuard = false
+    let activeDragCleanup: (() => void) | null = null
+    const cancelActiveDrag = () => {
+        const cleanup = activeDragCleanup
+        activeDragCleanup = null
+        cleanup?.()
+        _menuGuard = false
+    }
+    const cancelDragOnWindowBlur = () => cancelActiveDrag()
+    const cancelDragWhenHidden = () => {
+        if (document.hidden) cancelActiveDrag()
+    }
+    window.addEventListener('blur', cancelDragOnWindowBlur)
+    document.addEventListener('visibilitychange', cancelDragWhenHidden)
     const showSelectorMenu = () => {
-        if (!selectorMenu) return
+        if (!selectorMenu || !selectorAdjustmentMenu) return
         // Refresh dynamic icons (e.g. readOnly toggle color).
         for (const d of _dynamicMenuItems) {
             const r = d.fn()
@@ -188,13 +203,57 @@ export const editorTouchSelectionHelp = (
         if (selectorMenuShow) return
         selectorMenuShow = true
         selectorMenu.classList.add('show')
+        selectorAdjustmentMenu.classList.add('show')
     }
     const hideSelectorMenu = () => {
-        if (!selectorMenu) return
+        if (!selectorMenu || !selectorAdjustmentMenu) return
         if (!selectorMenuShow) return
         if (_menuGuard) return
         selectorMenuShow = false
         selectorMenu.classList.remove('show')
+        selectorAdjustmentMenu.classList.remove('show')
+    }
+
+    const positionSelectorMenus = (
+        anchorX: number,
+        preferredAboveY: number,
+        fallbackBelowY: number,
+    ) => {
+        if (!selectorMenu || !selectorAdjustmentMenu) return
+        showSelectorMenu()
+
+        const menuRect = selectorMenu.getBoundingClientRect()
+        const adjustmentRect = selectorAdjustmentMenu.getBoundingClientRect()
+        const islandGap = 6
+        const stackWidth = Math.max(menuRect.width, adjustmentRect.width)
+        const stackHeight = menuRect.height + islandGap + adjustmentRect.height
+
+        const viewportLeft = window.visualViewport?.offsetLeft ?? document.documentElement.offsetLeft
+        const viewportTop = window.visualViewport?.offsetTop ?? document.body.offsetTop
+        const viewportRight = window.visualViewport
+            ? window.visualViewport.offsetLeft + window.visualViewport.width
+            : document.documentElement.offsetLeft + document.body.clientWidth
+        const viewportBottom = window.visualViewport
+            ? window.visualViewport.offsetTop + window.visualViewport.height
+            : document.body.offsetTop + document.body.clientHeight
+
+        // Menus live at the document root and must be able to overlay the host
+        // menubar and drawers; only the visible viewport constrains them.
+        const minX = viewportLeft
+        const minY = viewportTop
+        const maxX = viewportRight
+        const maxY = viewportBottom
+        const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max))
+
+        const stackX = clamp(anchorX - stackWidth / 2, minX, maxX - stackWidth)
+        let stackY = preferredAboveY - stackHeight
+        if (stackY < minY) stackY = fallbackBelowY
+        stackY = clamp(stackY, minY, maxY - stackHeight)
+
+        const adjustmentX = stackX + (stackWidth - adjustmentRect.width) / 2
+        const menuX = stackX + (stackWidth - menuRect.width) / 2
+        selectorAdjustmentMenu.style.transform = `translateX(${adjustmentX}px) translateY(${stackY}px)`
+        selectorMenu.style.transform = `translateX(${menuX}px) translateY(${stackY + adjustmentRect.height + islandGap}px)`
     }
 
     let resizeOb: ResizeObserver | null = new ResizeObserver(() => {
@@ -207,6 +266,9 @@ export const editorTouchSelectionHelp = (
     resizeOb.observe(element)
 
     editor.onDidDispose(() => {
+        cancelActiveDrag()
+        window.removeEventListener('blur', cancelDragOnWindowBlur)
+        document.removeEventListener('visibilitychange', cancelDragWhenHidden)
         resizeOb?.disconnect()
         resizeOb = null
 
@@ -214,11 +276,13 @@ export const editorTouchSelectionHelp = (
         leftSelector?.remove()
         rightSelector?.remove()
         selectorMenu?.remove()
+        selectorAdjustmentMenu?.remove()
 
         selections = null
         leftSelector = null
         rightSelector = null
         selectorMenu = null
+        selectorAdjustmentMenu = null
     })
 
     const selectAll = () => {
@@ -227,6 +291,110 @@ export const editorTouchSelectionHelp = (
         if (model) {
             const fullRange = model.getFullModelRange()
             editor.setSelection(fullRange)
+        }
+    }
+
+    const previousModelPosition = (position: IPosition): IPosition => {
+        const model = editor.getModel()
+        if (!model) return position
+        if (position.column > 1) {
+            return {lineNumber: position.lineNumber, column: position.column - 1}
+        }
+        if (position.lineNumber > 1) {
+            const lineNumber = position.lineNumber - 1
+            return {lineNumber, column: model.getLineMaxColumn(lineNumber)}
+        }
+        return position
+    }
+
+    const nextModelPosition = (position: IPosition): IPosition => {
+        const model = editor.getModel()
+        if (!model) return position
+        const maxColumn = model.getLineMaxColumn(position.lineNumber)
+        if (position.column < maxColumn) {
+            return {lineNumber: position.lineNumber, column: position.column + 1}
+        }
+        if (position.lineNumber < model.getLineCount()) {
+            return {lineNumber: position.lineNumber + 1, column: 1}
+        }
+        return position
+    }
+
+    const growSelectionLeft = () => {
+        const selection = editor.getSelection()
+        if (!selection) return
+        const start = selection.getStartPosition()
+        const previous = previousModelPosition(start)
+        editor.setSelection({
+            startLineNumber: previous.lineNumber,
+            startColumn: previous.column,
+            endLineNumber: selection.endLineNumber,
+            endColumn: selection.endColumn,
+        })
+    }
+
+    const growSelectionRight = () => {
+        const selection = editor.getSelection()
+        if (!selection) return
+        const end = selection.getEndPosition()
+        const next = nextModelPosition(end)
+        editor.setSelection({
+            startLineNumber: selection.startLineNumber,
+            startColumn: selection.startColumn,
+            endLineNumber: next.lineNumber,
+            endColumn: next.column,
+        })
+    }
+
+    const resolveTouchPosition = (clientX: number, clientY: number): IPosition | null => {
+        const target = editor.getTargetAtClientPoint(clientX, clientY)
+        if (!target?.position) return null
+
+        const model = editor.getModel()
+        if (!model) return target.position
+
+        const lineNumber = target.position.lineNumber
+        const maxColumn = model.getLineMaxColumn(lineNumber)
+        const layout = editor.getLayoutInfo()
+        const editorRect = element.getBoundingClientRect()
+        const targetOffset = clientX - editorRect.left - layout.contentLeft + editor.getScrollLeft()
+
+        // Resolve against every rendered caret boundary in the visual row. The
+        // point target chooses the row only; it is not the horizontal authority.
+        try {
+            const contentLeft = editorRect.left + layout.contentLeft
+            const contentRight = contentLeft + Math.max(1, layout.contentWidth) - 1
+            const rowStart = editor.getTargetAtClientPoint(contentLeft, clientY)?.position
+            const rowEnd = editor.getTargetAtClientPoint(contentRight, clientY)?.position
+
+            if (rowStart?.lineNumber !== lineNumber || rowEnd?.lineNumber !== lineNumber) {
+                return target.position
+            }
+            let low = Math.min(rowStart.column, rowEnd.column, target.position.column)
+            let high = Math.max(rowStart.column, rowEnd.column, target.position.column)
+            low = Math.max(1, low)
+            high = Math.min(maxColumn, high)
+
+            while (low < high) {
+                const middle = Math.floor((low + high) / 2)
+                const offset = editor.getOffsetForColumn(lineNumber, middle)
+                if (offset < 0) return target.position
+                if (offset < targetOffset) low = middle + 1
+                else high = middle
+            }
+
+            const rightColumn = low
+            const leftColumn = Math.max(1, rightColumn - 1)
+            const rightOffset = editor.getOffsetForColumn(lineNumber, rightColumn)
+            const leftOffset = editor.getOffsetForColumn(lineNumber, leftColumn)
+            if (rightOffset < 0 || leftOffset < 0) return target.position
+
+            const column = Math.abs(targetOffset - leftOffset) <= Math.abs(rightOffset - targetOffset)
+                ? leftColumn
+                : rightColumn
+            return {lineNumber, column}
+        } catch (_error) {
+            return target.position
         }
     }
 
@@ -422,9 +590,7 @@ export const editorTouchSelectionHelp = (
             updateSelection: (selection: IRange, position: IPosition) => IRange
         ) => {
             const showSelectionMenuByTouch = (touch: Touch) => {
-                if (touch && selectorMenu && leftSelector && rightSelector) {
-                    showSelectorMenu()
-
+                if (touch && leftSelector && rightSelector) {
                     const leftRect = leftSelector.getBoundingClientRect()
                     const rightRect = rightSelector.getBoundingClientRect()
 
@@ -438,53 +604,31 @@ export const editorTouchSelectionHelp = (
 
                     // 选择距离更近的 selector
                     const closerRect = leftDistancePow2 <= rightDistancePow2 ? leftRect : rightRect;
-
-                    const elementRect = element.getBoundingClientRect()
-                    const menuRect = selectorMenu.getBoundingClientRect()
-
-                    let x = closerRect.left - menuRect.width / 2
-                    if (x + menuRect.width > elementRect.width + elementRect.left) x = elementRect.width + elementRect.left - menuRect.width
-                    if (x < 0) x = 0
-
-                    let y = closerRect.top - menuRect.height
-                    if (y + menuRect.height > elementRect.height + elementRect.top) y = elementRect.height + elementRect.top - menuRect.height
-                    if (y < 0) y = closerRect.top + lineHeight
-
-                    // 防止超出视野范围
-                    if (window.visualViewport) {
-                        const maxX = window.visualViewport.width + window.visualViewport.offsetLeft - menuRect.width
-                        const maxY = window.visualViewport.height + window.visualViewport.offsetTop - menuRect.height
-
-                        if (x < window.visualViewport.offsetLeft) x = window.visualViewport.offsetLeft
-                        else if (x > maxX) x = maxX
-                        if (y < window.visualViewport.offsetTop) y = window.visualViewport.offsetTop
-                        else if (y > maxY) y = maxY
-                    } else {
-                        const maxX = document.body.clientWidth + document.documentElement.offsetLeft - menuRect.width
-                        const maxY = document.body.clientHeight + document.documentElement.offsetTop - menuRect.height
-
-                        if (x < document.documentElement.offsetLeft) x = document.documentElement.offsetLeft;
-                        else if (x > maxX) x = maxX;
-                        if (y < document.body.offsetTop) y = document.body.offsetTop;
-                        else if (y > maxY) y = maxY;
-                    }
-
-                    selectorMenu.style.transform = `translateX(${x}px) translateY(${y}px)`
+                    positionSelectorMenus(
+                        closerRect.left + closerRect.width / 2,
+                        closerRect.top,
+                        closerRect.bottom + lineHeight,
+                    )
                 }
             }
 
-            let touchStartTime: number = 0
             selector.addEventListener('touchstart', (event: TouchEvent) => {
                 const initialSelection = editor.getSelection()
                 if (!initialSelection) return
 
                 let touch = event.changedTouches[0] ?? event.touches[0]
+                if (!touch) return
+                cancelActiveDrag()
+                _menuGuard = true
+                clearTimeout(syncSelectorTimer)
+                syncSelectorTimer = undefined
+                if (leftSelector) leftSelector.style.opacity = "0"
+                if (rightSelector) rightSelector.style.opacity = "0"
 
                 const selectionIsEmpty = initialSelection.isEmpty()
 
-                // Calculate offset between cursor visual position and touch point
-                // so the cursor tracks the teardrop handle, not the raw finger position.
-                // Extra lineHeight*2.5 offset lifts cursor above finger on real touch devices.
+                // Keep the handle's vertical grab offset while horizontal placement
+                // follows the raw touch coordinate without spatial magnification.
                 let touchOffsetY = 0
                 try {
                     const anchorPos = selector.classList.contains('left')
@@ -501,52 +645,76 @@ export const editorTouchSelectionHelp = (
                 // This lets taps and long-presses work without the interval
                 // immediately repositioning the cursor.
                 let revealTimer: ReturnType<typeof setInterval> | null = null
+                let touchMoved = false
+                const applyTouchPosition = () => {
+                    const position = resolveTouchPosition(
+                        touch.clientX,
+                        touch.clientY + touchOffsetY - lineHeight * 1.5,
+                    )
+                    if (!position) return
+                    if (selectionIsEmpty) {
+                        const current = editor.getPosition()
+                        if (current?.lineNumber === position.lineNumber && current.column === position.column) return
+                        editor.setPosition(position)
+                    } else {
+                        const nextSelection = updateSelection(initialSelection, position)
+                        const current = editor.getSelection()
+                        if (
+                            current?.startLineNumber === nextSelection.startLineNumber &&
+                            current.startColumn === nextSelection.startColumn &&
+                            current.endLineNumber === nextSelection.endLineNumber &&
+                            current.endColumn === nextSelection.endColumn
+                        ) return
+                        editor.setSelection(nextSelection)
+                    }
+                }
+                const sampleTouchPosition = () => {
+                    scrollTopExtremityFit(editor, touch, lineHeight)
+                    scrollLeftExtremityFit(editor, touch, fontSize)
+                    applyTouchPosition()
+                }
                 const startRevealTimer = () => {
                     if (revealTimer !== null) return
-                    revealTimer = setInterval(() => {
-                        scrollTopExtremityFit(editor, touch, lineHeight)
-                        scrollLeftExtremityFit(editor, touch, fontSize)
-                        const target = editor.getTargetAtClientPoint(touch.clientX, touch.clientY + touchOffsetY - lineHeight * 1.5)
-                        if (target && target.position) {
-                            if (selectionIsEmpty) {
-                                editor.setPosition(target.position)
-                            } else {
-                                editor.setSelection(updateSelection(initialSelection, target.position))
-                            }
-                        }
-                    }, REVEAL_INTERVAL)
+                    sampleTouchPosition()
+                    revealTimer = setInterval(sampleTouchPosition, REVEAL_INTERVAL)
                 }
 
                 const handleMove = (event: TouchEvent) => {
                     event.preventDefault()
-                    touch = event.changedTouches[0] ?? event.touches[0]
+                    touch = event.changedTouches[0] ?? event.touches[0] ?? touch
+                    touchMoved = true
                     startRevealTimer()
                 }
 
-                const handleEnd = (event: TouchEvent) => {
+                let cleaned = false
+                const cleanup = () => {
+                    if (cleaned) return
+                    cleaned = true
                     if (revealTimer !== null) clearInterval(revealTimer)
                     revealTimer = null
-
-                    if (Date.now() - touchStartTime > OPEN_MENU_TIMEOUT) {
-                        document.removeEventListener('touchmove', handleMove)
-                        document.removeEventListener('touchend', handleEnd)
-                        document.removeEventListener('touchcancel', handleEnd)
-                        return
-                    }
-
-                    event.preventDefault()
-                    touch = event.changedTouches[0] ?? event.touches[0]
-
-                    if (selectorMenu && editor.getSelection() !== null) {
-                        showSelectionMenuByTouch(touch)
-                    }
-
                     document.removeEventListener('touchmove', handleMove)
                     document.removeEventListener('touchend', handleEnd)
                     document.removeEventListener('touchcancel', handleEnd)
+                    if (activeDragCleanup === cleanup) activeDragCleanup = null
+                    const selection = editor.getSelection()
+                    if (selection) syncSelectionTransform(selection)
                 }
 
-                touchStartTime = Date.now()
+                const handleEnd = (event: TouchEvent) => {
+                    if (event.type !== 'touchcancel') event.preventDefault()
+                    touch = event.changedTouches[0] ?? event.touches[0] ?? touch
+                    if (touchMoved) applyTouchPosition()
+                    cleanup()
+
+                    const selection = editor.getSelection()
+                    if (event.type !== 'touchcancel' && selectorMenu && selection !== null) {
+                        showSelectionMenuByTouch(touch)
+                    }
+
+                    setTimeout(() => { _menuGuard = false }, 0)
+                }
+
+                activeDragCleanup = cleanup
                 document.addEventListener('touchmove', handleMove, {passive: false})
                 document.addEventListener('touchend', handleEnd)
                 document.addEventListener('touchcancel', handleEnd)
@@ -599,12 +767,52 @@ export const editorTouchSelectionHelp = (
 
     editor.onDidChangeCursorSelection((e) => {
         hideSelectorMenu()
+        if (activeDragCleanup) return
         setTimeout(() => {
             debounceSyncSelectionTransform(e.selection)
         }, 0)
     })
 
     initSelections()
+
+    const selectionAdjustmentTools: Map<DefaultToolName, SelectorMenuTool> = new Map([
+        [DefaultToolName.GrowSelectionLeft, {
+            name: 'grow selection left',
+            innerHTML: `
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    class="icon"
+    viewBox="0 0 24 24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    style="fill: none;"
+>
+    <path d="M 2 6 v 12 M 7 16 l -4 -4 l 4 -4 M 5 12 h 7"/>
+</svg>`,
+            action: () => {
+                growSelectionLeft()
+                showSelectorMenu()
+            },
+        }],
+        [DefaultToolName.GrowSelectionRight, {
+            name: 'grow selection right',
+            innerHTML: `
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    class="icon"
+    viewBox="0 0 24 24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    style="fill: none;"
+>
+    <path d="M 22 6 v 12 M 17 16 l 4 -4 l -4 -4 M 12 12 h 7"/>
+</svg>`,
+            action: () => {
+                growSelectionRight()
+                showSelectorMenu()
+            },
+        }],
+    ])
 
     const getMenuTools = (
         selectorMenu: HTMLDivElement
@@ -837,9 +1045,12 @@ export const editorTouchSelectionHelp = (
             }]
         ])
 
-        if (tools === undefined) {
-            return defaultTools.values()
-        }
+        for (const [name, tool] of selectionAdjustmentTools) defaultTools.set(name, tool)
+        const mainTools = () => Array.from(defaultTools)
+            .filter(([name]) => !selectionAdjustmentTools.has(name))
+            .map(([, tool]) => tool)
+
+        if (tools === undefined) return mainTools()
 
         if (typeof tools === 'function') {
             const result = tools({
@@ -850,71 +1061,90 @@ export const editorTouchSelectionHelp = (
                 closeMenu: hideSelectorMenu,
             })
             if (result === undefined) {
-                return defaultTools.values()
+                return mainTools()
             }
             return result
         }
 
-        return defaultTools.values()
+        return mainTools()
     }
 
     const initSelectorMenu = () => {
         selectorMenu = document.createElement('div')
         selectorMenu.classList.add('monaco-editor-touch-selector-menu')
+        selectorAdjustmentMenu = document.createElement('div')
+        selectorAdjustmentMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-adjustment')
 
-        for (const menuTool of getMenuTools(selectorMenu)) {
-            const menuItemElement = document.createElement('div')
-            menuItemElement.classList.add('menu-item')
+        const appendMenuTools = (
+            menu: HTMLDivElement,
+            menuTools: Iterable<SelectorMenuTool>,
+            trackDynamicItems: boolean,
+        ) => {
+            for (const menuTool of menuTools) {
+                const menuItemElement = document.createElement('div')
+                menuItemElement.classList.add('menu-item')
+                menuItemElement.title = menuTool.name
 
-            if (typeof menuTool.innerHTML === 'function') {
-                const result = menuTool.innerHTML()
-                if (typeof result === 'string') menuItemElement.innerHTML = result
-                else menuItemElement.appendChild(result)
-                _dynamicMenuItems.push({ el: menuItemElement, fn: menuTool.innerHTML })
-            } else {
-                if (typeof menuTool.innerHTML === 'string') menuItemElement.innerHTML = menuTool.innerHTML
-                else menuItemElement.appendChild(menuTool.innerHTML)
-            }
-
-            const runAction = async () => {
-                try {
-                    await menuTool.action()
-                } catch (e) {
-                    await toolActionErrorHandler(menuTool.name, e)
+                if (typeof menuTool.innerHTML === 'function') {
+                    const result = menuTool.innerHTML()
+                    if (typeof result === 'string') menuItemElement.innerHTML = result
+                    else menuItemElement.appendChild(result)
+                    if (trackDynamicItems) {
+                        _dynamicMenuItems.push({ el: menuItemElement, fn: menuTool.innerHTML })
+                    }
+                } else {
+                    if (typeof menuTool.innerHTML === 'string') menuItemElement.innerHTML = menuTool.innerHTML
+                    else menuItemElement.appendChild(menuTool.innerHTML)
                 }
+
+                const runAction = async () => {
+                    try {
+                        await menuTool.action()
+                    } catch (e) {
+                        await toolActionErrorHandler(menuTool.name, e)
+                    }
+                }
+                menuItemElement.addEventListener('touchend', runAction)
+                menuItemElement.addEventListener('click', runAction)
+
+                menu.appendChild(menuItemElement)
             }
-            menuItemElement.addEventListener('touchend', runAction)
-            menuItemElement.addEventListener('click', runAction)
-
-            selectorMenu.appendChild(menuItemElement)
         }
+        appendMenuTools(selectorMenu, getMenuTools(selectorMenu), true)
+        appendMenuTools(selectorAdjustmentMenu, selectionAdjustmentTools.values(), false)
 
-        selectorMenu.addEventListener('touchstart', (event) => {
-            event.preventDefault()
-        }, {passive: false})
+        const setupMenuEvents = (menu: HTMLDivElement) => {
+            menu.addEventListener('touchstart', (event) => {
+                event.preventDefault()
+            }, {passive: false})
 
-        selectorMenu.addEventListener('touchmove', (event) => {
-            event.preventDefault()
-        }, {passive: false})
+            menu.addEventListener('touchmove', (event) => {
+                event.preventDefault()
+            }, {passive: false})
 
-        selectorMenu.addEventListener('touchend', (event) => {
-            event.preventDefault()
-        }, {passive: false})
+            menu.addEventListener('touchend', (event) => {
+                event.preventDefault()
+            }, {passive: false})
 
-        // Prevent mousedown on menu from blurring the editor widget.
-        selectorMenu.addEventListener('mousedown', (event) => {
-            event.preventDefault()
-        })
+            // Prevent mousedown on menu from blurring the editor widget.
+            menu.addEventListener('mousedown', (event) => {
+                event.preventDefault()
+            })
+        }
+        setupMenuEvents(selectorMenu)
+        setupMenuEvents(selectorAdjustmentMenu)
 
         // Click outside menu dismisses it.
         document.addEventListener('mousedown', (event) => {
-            if (!selectorMenuShow || !selectorMenu) return
+            if (!selectorMenuShow || !selectorMenu || !selectorAdjustmentMenu) return
             if (selectorMenu.contains(event.target as Node)) return
+            if (selectorAdjustmentMenu.contains(event.target as Node)) return
             selectorMenuShow = false
             selectorMenu.classList.remove('show')
+            selectorAdjustmentMenu.classList.remove('show')
         })
 
-        document.documentElement.append(selectorMenu)
+        document.documentElement.append(selectorMenu, selectorAdjustmentMenu)
     }
     initSelectorMenu()
 
@@ -935,7 +1165,7 @@ export const editorTouchSelectionHelp = (
     element.addEventListener('contextmenu', (event: MouseEvent) => {
         event.preventDefault()
         event.stopPropagation()
-        if (!selectorMenu) return
+        if (!selectorMenu || !selectorAdjustmentMenu) return
 
         // Guard: prevent onDidChangeCursorSelection / onDidBlurEditorWidget from
         // immediately hiding the menu we're about to show.
@@ -951,27 +1181,7 @@ export const editorTouchSelectionHelp = (
             }
         }
 
-        showSelectorMenu()
-        const elementRect = element.getBoundingClientRect()
-        const menuRect = selectorMenu.getBoundingClientRect()
-
-        let x = event.clientX - menuRect.width / 2
-        if (x + menuRect.width > elementRect.width + elementRect.left) x = elementRect.width + elementRect.left - menuRect.width
-        if (x < 0) x = 0
-
-        let y = event.clientY - menuRect.height - 10
-        if (y < 0) y = event.clientY + 10
-
-        if (window.visualViewport) {
-            const maxX = window.visualViewport.width + window.visualViewport.offsetLeft - menuRect.width
-            const maxY = window.visualViewport.height + window.visualViewport.offsetTop - menuRect.height
-            if (x < window.visualViewport.offsetLeft) x = window.visualViewport.offsetLeft
-            else if (x > maxX) x = maxX
-            if (y < window.visualViewport.offsetTop) y = window.visualViewport.offsetTop
-            else if (y > maxY) y = maxY
-        }
-
-        selectorMenu.style.transform = `translateX(${x}px) translateY(${y}px)`
+        positionSelectorMenus(event.clientX, event.clientY - 10, event.clientY + 10)
 
         // Release guard after current event loop so blur/selection handlers don't fire.
         setTimeout(() => { _menuGuard = false }, 0)
