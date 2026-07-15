@@ -24,6 +24,7 @@ export enum DefaultToolName {
     SelectAll = 'selectAll',
     Hover = 'hover',
     Find = 'find',
+    Mention = 'mention',
     ReadOnly = 'readOnly',
     Undo = 'undo',
     Redo = 'redo',
@@ -801,6 +802,18 @@ export const editorTouchSelectionHelp = (
                         } catch (_) {}
                     }
                     showSelectorMenu()
+                }
+            }],
+            [DefaultToolName.Mention, {
+                name: 'mention',
+                innerHTML: `<span class="icon" style="font-size: 1.2em; line-height: 1;">💬</span>`,
+                action: () => {
+                    hideSelectorMenu()
+                    try {
+                        const dom = editor.getDomNode()
+                        if (dom) dom.dispatchEvent(new CustomEvent('te2:mention-request', { bubbles: false }))
+                    } catch (_) {}
+                    return true
                 }
             }],
             [DefaultToolName.Close, {
