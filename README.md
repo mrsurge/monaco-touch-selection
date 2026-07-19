@@ -175,9 +175,9 @@ other host source changes.
 - Resolve horizontal placement against Monaco's rendered insertion boundaries;
   tabs, proportional glyphs, wrapped rows, and horizontal scroll make character
   width arithmetic unreliable.
-- Mount floating menus at the document root, retain their high z-index, and
-  clamp only to the visual viewport. They must be allowed to overlay Code TE2
-  drawers and the menubar.
+- Mount floating menus at the document root and clamp only to the visual
+  viewport. Keep their layer above Monaco content but below Code TE2's Explorer
+  and sidebar drawers; the menu remains one layer above the touch handles.
 - Preserve touch-only automatic menu opening and desktop's explicit right-click
   behavior when changing menu lifecycle code.
 - Modify touch-target sizing and menu presentation in `src/style.css`, then
