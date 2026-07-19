@@ -78,7 +78,16 @@ declare enum DefaultToolName {
     Copy = "copy",
     Cut = "cut",
     Paste = "paste",
+    SelectWord = "selectWord",
     SelectAll = "selectAll",
+    GrowSelectionLeft = "growSelectionLeft",
+    GrowSelectionRight = "growSelectionRight",
+    ShrinkSelectionLeft = "shrinkSelectionLeft",
+    ShrinkSelectionRight = "shrinkSelectionRight",
+    Hover = "hover",
+    Find = "find",
+    Mention = "mention",
+    ReadOnly = "readOnly",
     Undo = "undo",
     Redo = "redo",
     Close = "close"
@@ -103,13 +112,13 @@ If you want to make simple style modifications, you can override the following C
 
 ```css
 :root {
-    --monaco-editor_touch-selection_z-index: 100000;
+    --monaco-editor_touch-selection_z-index: 40;
     --monaco-editor_touch-selector_color: #1E90FF;
     --monaco-editor_touch-selector_size: 1.2rem;
 
-    --monaco-editor_touch-selector-menu_z-index: 100001;
+    --monaco-editor_touch-selector-menu_z-index: 41;
     --monaco-editor_touch-selector-menu_bg-color: #f7f7f7;
-    --monaco-editor_touch-selector-menu_height: 1.8rem;
+    --monaco-editor_touch-selector-menu_height: 2.4rem;
     --monaco-editor_touch-selector-menu_border-color: #ccc;
     --monaco-editor_touch-selector-menu_icon-color: #666;
 }
@@ -178,8 +187,17 @@ other host source changes.
 - Mount floating menus at the document root and clamp only to the visual
   viewport. Keep their layer above Monaco content but below Code TE2's Explorer
   and sidebar drawers; the menu remains one layer above the touch handles.
-- Preserve touch-only automatic menu opening and desktop's explicit right-click
-  behavior when changing menu lifecycle code.
+- Keep the three-island adjustment row touch-origin only. Desktop right-click
+  opens the main row without adjustment controls, while handle release opens
+  shrink-left, paired grow, and shrink-right islands above it.
+- Keep the touch adjustment row flush with the main row and let their shared
+  root stack consume seam touches. The rows retain the original 2.4rem control
+  size and overlap by one border pixel so the boundary cannot expose a dead hit
+  gap or dismiss the menu.
+- Grow and shrink operate on normalized Monaco range edges one model position at
+  a time. Shrink stops once the selection is empty.
+- The teardrops intentionally retain their smaller visual size while pseudo
+  elements expand the bottom target by 14px and the cursor-bar target to 32px.
 - Modify touch-target sizing and menu presentation in `src/style.css`, then
   rebuild and deploy both generated assets together.
 
@@ -197,5 +215,5 @@ git diff --check
 
 Live validation should cover a sustained handle drag, column-by-column
 placement, edge auto-scroll, interrupted drag cleanup, menu placement near all
-viewport edges, drawer/menubar overlay, touch menu activation, and desktop
-right-click behavior.
+viewport edges, drawer/sidebar occlusion, all four edge-adjustment actions,
+seam mis-taps, touch menu activation, and desktop right-click behavior.

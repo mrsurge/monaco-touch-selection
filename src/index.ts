@@ -8,6 +8,7 @@ const OPTION_LineHeight_FALLBACK = 67
 const DEFAULT_SELECTION_SYNC_TIMEOUT = 300
 const DBLCLICK_OPEN_MENU_TIMEOUT = 1000
 const REVEAL_INTERVAL = 50
+const TOUCH_CONTEXT_MENU_WINDOW = 2000
 
 export type SelectorMenuTool = {
     name: string,
@@ -23,6 +24,8 @@ export enum DefaultToolName {
     SelectAll = 'selectAll',
     GrowSelectionLeft = 'growSelectionLeft',
     GrowSelectionRight = 'growSelectionRight',
+    ShrinkSelectionLeft = 'shrinkSelectionLeft',
+    ShrinkSelectionRight = 'shrinkSelectionRight',
     Hover = 'hover',
     Find = 'find',
     Mention = 'mention',
@@ -173,8 +176,14 @@ export const editorTouchSelectionHelp = (
     }
 
     let selectorMenuShow = false
+    let selectorMenuStack: HTMLDivElement | null = null
     let selectorMenu: HTMLDivElement | null = null
+    let selectorAdjustmentRow: HTMLDivElement | null = null
     let selectorAdjustmentMenu: HTMLDivElement | null = null
+    let selectorShrinkLeftMenu: HTMLDivElement | null = null
+    let selectorShrinkRightMenu: HTMLDivElement | null = null
+    let menuOutsideMouseDownHandler: ((event: MouseEvent) => void) | null = null
+    let lastTouchInteractionAt = 0
     // Track menu items with dynamic (function) innerHTML for refresh on show.
     const _dynamicMenuItems: { el: HTMLDivElement, fn: () => string | Element }[] = []
     // Suppress auto-hide while a right-click or touch-handle flow opens the menus.
@@ -193,7 +202,7 @@ export const editorTouchSelectionHelp = (
     window.addEventListener('blur', cancelDragOnWindowBlur)
     document.addEventListener('visibilitychange', cancelDragWhenHidden)
     const showSelectorMenu = () => {
-        if (!selectorMenu || !selectorAdjustmentMenu) return
+        if (!selectorMenuStack) return
         // Refresh dynamic icons (e.g. readOnly toggle color).
         for (const d of _dynamicMenuItems) {
             const r = d.fn()
@@ -202,31 +211,29 @@ export const editorTouchSelectionHelp = (
         }
         if (selectorMenuShow) return
         selectorMenuShow = true
-        selectorMenu.classList.add('show')
-        selectorAdjustmentMenu.classList.add('show')
+        selectorMenuStack.classList.add('show')
     }
     const hideSelectorMenu = () => {
-        if (!selectorMenu || !selectorAdjustmentMenu) return
+        if (!selectorMenuStack) return
         if (!selectorMenuShow) return
         if (_menuGuard) return
         selectorMenuShow = false
-        selectorMenu.classList.remove('show')
-        selectorAdjustmentMenu.classList.remove('show')
+        selectorMenuStack.classList.remove('show')
     }
 
     const positionSelectorMenus = (
         anchorX: number,
         preferredAboveY: number,
         fallbackBelowY: number,
+        touchMode: boolean,
     ) => {
-        if (!selectorMenu || !selectorAdjustmentMenu) return
+        if (!selectorMenuStack) return
+        selectorMenuStack.classList.toggle('touch-mode', touchMode)
         showSelectorMenu()
 
-        const menuRect = selectorMenu.getBoundingClientRect()
-        const adjustmentRect = selectorAdjustmentMenu.getBoundingClientRect()
-        const islandGap = 6
-        const stackWidth = Math.max(menuRect.width, adjustmentRect.width)
-        const stackHeight = menuRect.height + islandGap + adjustmentRect.height
+        const stackRect = selectorMenuStack.getBoundingClientRect()
+        const stackWidth = stackRect.width
+        const stackHeight = stackRect.height
 
         const viewportLeft = window.visualViewport?.offsetLeft ?? document.documentElement.offsetLeft
         const viewportTop = window.visualViewport?.offsetTop ?? document.body.offsetTop
@@ -237,8 +244,8 @@ export const editorTouchSelectionHelp = (
             ? window.visualViewport.offsetTop + window.visualViewport.height
             : document.body.offsetTop + document.body.clientHeight
 
-        // Menus live at the document root and must be able to overlay the host
-        // menubar and drawers; only the visible viewport constrains them.
+        // The root stack avoids dead hit gaps while one viewport-clamped transform
+        // keeps every island aligned with the active selection handle.
         const minX = viewportLeft
         const minY = viewportTop
         const maxX = viewportRight
@@ -250,10 +257,7 @@ export const editorTouchSelectionHelp = (
         if (stackY < minY) stackY = fallbackBelowY
         stackY = clamp(stackY, minY, maxY - stackHeight)
 
-        const adjustmentX = stackX + (stackWidth - adjustmentRect.width) / 2
-        const menuX = stackX + (stackWidth - menuRect.width) / 2
-        selectorAdjustmentMenu.style.transform = `translateX(${adjustmentX}px) translateY(${stackY}px)`
-        selectorMenu.style.transform = `translateX(${menuX}px) translateY(${stackY + adjustmentRect.height + islandGap}px)`
+        selectorMenuStack.style.transform = `translateX(${stackX}px) translateY(${stackY}px)`
     }
 
     let resizeOb: ResizeObserver | null = new ResizeObserver(() => {
@@ -269,20 +273,27 @@ export const editorTouchSelectionHelp = (
         cancelActiveDrag()
         window.removeEventListener('blur', cancelDragOnWindowBlur)
         document.removeEventListener('visibilitychange', cancelDragWhenHidden)
+        if (menuOutsideMouseDownHandler) {
+            document.removeEventListener('mousedown', menuOutsideMouseDownHandler)
+            menuOutsideMouseDownHandler = null
+        }
         resizeOb?.disconnect()
         resizeOb = null
 
         selections?.remove()
         leftSelector?.remove()
         rightSelector?.remove()
-        selectorMenu?.remove()
-        selectorAdjustmentMenu?.remove()
+        selectorMenuStack?.remove()
 
         selections = null
         leftSelector = null
         rightSelector = null
+        selectorMenuStack = null
         selectorMenu = null
+        selectorAdjustmentRow = null
         selectorAdjustmentMenu = null
+        selectorShrinkLeftMenu = null
+        selectorShrinkRightMenu = null
     })
 
     const selectAll = () => {
@@ -343,6 +354,30 @@ export const editorTouchSelectionHelp = (
             startColumn: selection.startColumn,
             endLineNumber: next.lineNumber,
             endColumn: next.column,
+        })
+    }
+
+    const shrinkSelectionLeft = () => {
+        const selection = editor.getSelection()
+        if (!selection || selection.isEmpty()) return
+        const next = nextModelPosition(selection.getStartPosition())
+        editor.setSelection({
+            startLineNumber: next.lineNumber,
+            startColumn: next.column,
+            endLineNumber: selection.endLineNumber,
+            endColumn: selection.endColumn,
+        })
+    }
+
+    const shrinkSelectionRight = () => {
+        const selection = editor.getSelection()
+        if (!selection || selection.isEmpty()) return
+        const previous = previousModelPosition(selection.getEndPosition())
+        editor.setSelection({
+            startLineNumber: selection.startLineNumber,
+            startColumn: selection.startColumn,
+            endLineNumber: previous.lineNumber,
+            endColumn: previous.column,
         })
     }
 
@@ -608,6 +643,7 @@ export const editorTouchSelectionHelp = (
                         closerRect.left + closerRect.width / 2,
                         closerRect.top,
                         closerRect.bottom + lineHeight,
+                        true,
                     )
                 }
             }
@@ -774,6 +810,45 @@ export const editorTouchSelectionHelp = (
     })
 
     initSelections()
+
+    const selectionShrinkTools: Map<DefaultToolName, SelectorMenuTool> = new Map([
+        [DefaultToolName.ShrinkSelectionLeft, {
+            name: 'shrink selection from left',
+            innerHTML: `
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    class="icon"
+    viewBox="0 0 24 24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    style="fill: none;"
+>
+    <path d="M 2 6 v 12 M 7 8 l 4 4 l -4 4 M 3 12 h 8"/>
+</svg>`,
+            action: () => {
+                shrinkSelectionLeft()
+                showSelectorMenu()
+            },
+        }],
+        [DefaultToolName.ShrinkSelectionRight, {
+            name: 'shrink selection from right',
+            innerHTML: `
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    class="icon"
+    viewBox="0 0 24 24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    style="fill: none;"
+>
+    <path d="M 22 6 v 12 M 17 8 l -4 4 l 4 4 M 13 12 h 8"/>
+</svg>`,
+            action: () => {
+                shrinkSelectionRight()
+                showSelectorMenu()
+            },
+        }],
+    ])
 
     const selectionAdjustmentTools: Map<DefaultToolName, SelectorMenuTool> = new Map([
         [DefaultToolName.GrowSelectionLeft, {
@@ -1046,8 +1121,9 @@ export const editorTouchSelectionHelp = (
         ])
 
         for (const [name, tool] of selectionAdjustmentTools) defaultTools.set(name, tool)
+        for (const [name, tool] of selectionShrinkTools) defaultTools.set(name, tool)
         const mainTools = () => Array.from(defaultTools)
-            .filter(([name]) => !selectionAdjustmentTools.has(name))
+            .filter(([name]) => !selectionAdjustmentTools.has(name) && !selectionShrinkTools.has(name))
             .map(([, tool]) => tool)
 
         if (tools === undefined) return mainTools()
@@ -1070,10 +1146,26 @@ export const editorTouchSelectionHelp = (
     }
 
     const initSelectorMenu = () => {
+        selectorMenuStack = document.createElement('div')
+        selectorMenuStack.classList.add('monaco-editor-touch-selector-menu-stack')
+
         selectorMenu = document.createElement('div')
-        selectorMenu.classList.add('monaco-editor-touch-selector-menu')
+        selectorMenu.classList.add('monaco-editor-touch-selector-menu', 'main-menu')
+
+        selectorAdjustmentRow = document.createElement('div')
+        selectorAdjustmentRow.classList.add('selection-adjustment-row')
+
+        selectorShrinkLeftMenu = document.createElement('div')
+        selectorShrinkLeftMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-shrink-left')
+
         selectorAdjustmentMenu = document.createElement('div')
         selectorAdjustmentMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-adjustment')
+
+        selectorShrinkRightMenu = document.createElement('div')
+        selectorShrinkRightMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-shrink-right')
+
+        selectorAdjustmentRow.append(selectorShrinkLeftMenu, selectorAdjustmentMenu, selectorShrinkRightMenu)
+        selectorMenuStack.append(selectorAdjustmentRow, selectorMenu)
 
         const appendMenuTools = (
             menu: HTMLDivElement,
@@ -1112,6 +1204,10 @@ export const editorTouchSelectionHelp = (
         }
         appendMenuTools(selectorMenu, getMenuTools(selectorMenu), true)
         appendMenuTools(selectorAdjustmentMenu, selectionAdjustmentTools.values(), false)
+        const shrinkLeftTool = selectionShrinkTools.get(DefaultToolName.ShrinkSelectionLeft)
+        const shrinkRightTool = selectionShrinkTools.get(DefaultToolName.ShrinkSelectionRight)
+        if (shrinkLeftTool) appendMenuTools(selectorShrinkLeftMenu, [shrinkLeftTool], false)
+        if (shrinkRightTool) appendMenuTools(selectorShrinkRightMenu, [shrinkRightTool], false)
 
         const setupMenuEvents = (menu: HTMLDivElement) => {
             menu.addEventListener('touchstart', (event) => {
@@ -1131,24 +1227,23 @@ export const editorTouchSelectionHelp = (
                 event.preventDefault()
             })
         }
-        setupMenuEvents(selectorMenu)
-        setupMenuEvents(selectorAdjustmentMenu)
+        setupMenuEvents(selectorMenuStack)
 
         // Click outside menu dismisses it.
-        document.addEventListener('mousedown', (event) => {
-            if (!selectorMenuShow || !selectorMenu || !selectorAdjustmentMenu) return
-            if (selectorMenu.contains(event.target as Node)) return
-            if (selectorAdjustmentMenu.contains(event.target as Node)) return
+        menuOutsideMouseDownHandler = (event: MouseEvent) => {
+            if (!selectorMenuShow || !selectorMenuStack) return
+            if (selectorMenuStack.contains(event.target as Node)) return
             selectorMenuShow = false
-            selectorMenu.classList.remove('show')
-            selectorAdjustmentMenu.classList.remove('show')
-        })
+            selectorMenuStack.classList.remove('show')
+        }
+        document.addEventListener('mousedown', menuOutsideMouseDownHandler)
 
-        document.documentElement.append(selectorMenu, selectorAdjustmentMenu)
+        document.documentElement.append(selectorMenuStack)
     }
     initSelectorMenu()
 
     element.addEventListener('touchstart', () => {
+        lastTouchInteractionAt = Date.now()
         showSelections()
     }, {passive: true})
 
@@ -1165,7 +1260,7 @@ export const editorTouchSelectionHelp = (
     element.addEventListener('contextmenu', (event: MouseEvent) => {
         event.preventDefault()
         event.stopPropagation()
-        if (!selectorMenu || !selectorAdjustmentMenu) return
+        if (!selectorMenuStack) return
 
         // Guard: prevent onDidChangeCursorSelection / onDidBlurEditorWidget from
         // immediately hiding the menu we're about to show.
@@ -1181,7 +1276,12 @@ export const editorTouchSelectionHelp = (
             }
         }
 
-        positionSelectorMenus(event.clientX, event.clientY - 10, event.clientY + 10)
+        const sourceCapabilities = (event as MouseEvent & {
+            sourceCapabilities?: { firesTouchEvents?: boolean }
+        }).sourceCapabilities
+        const touchOrigin = sourceCapabilities?.firesTouchEvents === true
+            || Date.now() - lastTouchInteractionAt <= TOUCH_CONTEXT_MENU_WINDOW
+        positionSelectorMenus(event.clientX, event.clientY - 10, event.clientY + 10, touchOrigin)
 
         // Release guard after current event loop so blur/selection handlers don't fire.
         setTimeout(() => { _menuGuard = false }, 0)
