@@ -178,10 +178,7 @@ export const editorTouchSelectionHelp = (
     let selectorMenuShow = false
     let selectorMenuStack: HTMLDivElement | null = null
     let selectorMenu: HTMLDivElement | null = null
-    let selectorAdjustmentRow: HTMLDivElement | null = null
     let selectorAdjustmentMenu: HTMLDivElement | null = null
-    let selectorShrinkLeftMenu: HTMLDivElement | null = null
-    let selectorShrinkRightMenu: HTMLDivElement | null = null
     let menuOutsideMouseDownHandler: ((event: MouseEvent) => void) | null = null
     let lastTouchInteractionAt = 0
     // Track menu items with dynamic (function) innerHTML for refresh on show.
@@ -290,10 +287,7 @@ export const editorTouchSelectionHelp = (
         rightSelector = null
         selectorMenuStack = null
         selectorMenu = null
-        selectorAdjustmentRow = null
         selectorAdjustmentMenu = null
-        selectorShrinkLeftMenu = null
-        selectorShrinkRightMenu = null
     })
 
     const selectAll = () => {
@@ -1152,20 +1146,10 @@ export const editorTouchSelectionHelp = (
         selectorMenu = document.createElement('div')
         selectorMenu.classList.add('monaco-editor-touch-selector-menu', 'main-menu')
 
-        selectorAdjustmentRow = document.createElement('div')
-        selectorAdjustmentRow.classList.add('selection-adjustment-row')
-
-        selectorShrinkLeftMenu = document.createElement('div')
-        selectorShrinkLeftMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-shrink-left')
-
         selectorAdjustmentMenu = document.createElement('div')
-        selectorAdjustmentMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-adjustment')
+        selectorAdjustmentMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-adjustment-row')
 
-        selectorShrinkRightMenu = document.createElement('div')
-        selectorShrinkRightMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-shrink-right')
-
-        selectorAdjustmentRow.append(selectorShrinkLeftMenu, selectorAdjustmentMenu, selectorShrinkRightMenu)
-        selectorMenuStack.append(selectorAdjustmentRow, selectorMenu)
+        selectorMenuStack.append(selectorAdjustmentMenu, selectorMenu)
 
         const appendMenuTools = (
             menu: HTMLDivElement,
@@ -1203,11 +1187,11 @@ export const editorTouchSelectionHelp = (
             }
         }
         appendMenuTools(selectorMenu, getMenuTools(selectorMenu), true)
-        appendMenuTools(selectorAdjustmentMenu, selectionAdjustmentTools.values(), false)
         const shrinkLeftTool = selectionShrinkTools.get(DefaultToolName.ShrinkSelectionLeft)
         const shrinkRightTool = selectionShrinkTools.get(DefaultToolName.ShrinkSelectionRight)
-        if (shrinkLeftTool) appendMenuTools(selectorShrinkLeftMenu, [shrinkLeftTool], false)
-        if (shrinkRightTool) appendMenuTools(selectorShrinkRightMenu, [shrinkRightTool], false)
+        if (shrinkLeftTool) appendMenuTools(selectorAdjustmentMenu, [shrinkLeftTool], false)
+        appendMenuTools(selectorAdjustmentMenu, selectionAdjustmentTools.values(), false)
+        if (shrinkRightTool) appendMenuTools(selectorAdjustmentMenu, [shrinkRightTool], false)
 
         const setupMenuEvents = (menu: HTMLDivElement) => {
             menu.addEventListener('touchstart', (event) => {

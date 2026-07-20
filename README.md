@@ -116,7 +116,7 @@ If you want to make simple style modifications, you can override the following C
     --monaco-editor_touch-selector_color: #1E90FF;
     --monaco-editor_touch-selector_size: 1.2rem;
 
-    --monaco-editor_touch-selector-menu_z-index: 41;
+    --monaco-editor_touch-selector-menu_z-index: 350;
     --monaco-editor_touch-selector-menu_bg-color: #f7f7f7;
     --monaco-editor_touch-selector-menu_height: 2.4rem;
     --monaco-editor_touch-selector-menu_border-color: #ccc;
@@ -185,11 +185,11 @@ other host source changes.
   tabs, proportional glyphs, wrapped rows, and horizontal scroll make character
   width arithmetic unreliable.
 - Mount floating menus at the document root and clamp only to the visual
-  viewport. Keep their layer above Monaco content but below Code TE2's Explorer
-  and sidebar drawers; the menu remains one layer above the touch handles.
-- Keep the three-island adjustment row touch-origin only. Desktop right-click
-  opens the main row without adjustment controls, while handle release opens
-  shrink-left, paired grow, and shrink-right islands above it.
+  viewport. Keep the menu above Code TE2's Explorer, sidebar, menubar, and
+  toolbar while the touch handles remain in Monaco's lower content layer.
+- Keep the centered single-island adjustment row touch-origin only. Desktop
+  right-click opens the main row without adjustment controls, while handle
+  release opens shrink-left, grow-left, grow-right, and shrink-right above it.
 - Keep the touch adjustment row flush with the main row and let their shared
   root stack consume seam touches. The rows retain the original 2.4rem control
   size and overlap by one border pixel so the boundary cannot expose a dead hit
