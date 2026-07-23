@@ -166,6 +166,41 @@ require rebuilding Code TE2's host bundle because the host loads the vendor
 URLs directly. Rebuild Code TE2 itself if `inline_host.ts`, its asset paths, or
 other host source changes.
 
+### Live Drag Diagnostics
+
+The UMD global exposes a bounded diagnostic recorder that is disabled by
+default. Enable it in one exact Code TE2 `main_page` worker with TE2 console
+eval before reproducing a handle drag:
+
+```sh
+te2 console eval --worker main_page:<worker-suffix> --code \
+  "window['monaco-touch-selection'].touchSelectionDebug.start({capacity:2048,candidateRadius:4,captureMoves:true})"
+```
+
+Retrieve the most recent drag as JSON-safe data, or retrieve a filtered
+snapshot when multiple editor instances are present:
+
+```sh
+te2 console eval --worker main_page:<worker-suffix> --code \
+  "window['monaco-touch-selection'].touchSelectionDebug.latestDrag()"
+
+te2 console eval --worker main_page:<worker-suffix> --code \
+  "window['monaco-touch-selection'].touchSelectionDebug.snapshot({instanceId:1,limit:500})"
+```
+
+Capture records raw and adjusted touch coordinates, DOM hit stacks, visual
+viewport and editor geometry, rendered caret-boundary candidates, resolver
+fallback reasons, scroll changes, selection writes/events, and drag cleanup.
+`stop()` disables collection while retaining the current records; `clear()`
+discards them explicitly:
+
+```sh
+te2 console eval --worker main_page:<worker-suffix> --code \
+  "window['monaco-touch-selection'].touchSelectionDebug.stop()"
+te2 console eval --worker main_page:<worker-suffix> --code \
+  "window['monaco-touch-selection'].touchSelectionDebug.clear()"
+```
+
 ### Modification Guardrails
 
 - Keep touch coordinates in browser CSS pixels. Do not apply `devicePixelRatio`,
@@ -181,6 +216,12 @@ other host source changes.
 - Keep one authoritative active-drag cleanup. It must clear the interval and
   document listeners on end, cancel, replacement, editor disposal, window blur,
   and document hiding.
+- Force-hide the previous selector menu before a new handle drag enables its
+  menu guard. A visible document-root menu can otherwise intercept Monaco's
+  adjusted caret hit test near the previous handle origin.
+- Disable pointer hit testing on the handle layer for the lifetime of an active
+  drag, then restore it in authoritative cleanup. Opacity alone does not remove
+  the enlarged handle pseudo-elements from browser hit testing.
 - Resolve horizontal placement against Monaco's rendered insertion boundaries;
   tabs, proportional glyphs, wrapped rows, and horizontal scroll make character
   width arithmetic unreliable.

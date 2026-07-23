@@ -1,4 +1,24 @@
 import {editor, type IPosition, type IRange} from "monaco-editor/esm/vs/editor/editor.api.js"
+import {
+    describeDebugHitStack,
+    describeDebugPosition,
+    describeDebugRect,
+    describeDebugSelection,
+    describeDebugTouch,
+    getTouchSelectionDebugCandidateRadius,
+    isTouchSelectionDebugEnabled,
+    nextTouchSelectionDebugDragId,
+    recordTouchSelectionDebug,
+    registerTouchSelectionDebugInstance,
+    shouldCaptureTouchSelectionMoves,
+    unregisterTouchSelectionDebugInstance,
+} from "./debug.js"
+
+export {
+    touchSelectionDebug,
+    type TouchSelectionDebugOptions,
+    type TouchSelectionDebugSnapshotOptions,
+} from "./debug.js"
 
 type ICodeEditor = editor.ICodeEditor;
 
@@ -146,10 +166,18 @@ export const editorTouchSelectionHelp = (
         throw new Error("editor container element not existed or it is not a HTMLElement")
     }
 
-
     const editorOverlayGuard = element.querySelector('.overflow-guard')
     if (!editorOverlayGuard || !(editorOverlayGuard instanceof HTMLElement)) {
         throw new Error("no overlay guard or it is not a HTMLElement")
+    }
+
+    const debugInstanceId = registerTouchSelectionDebugInstance()
+    const recordDebug = (type: string, payload: Record<string, unknown> = {}) => {
+        recordTouchSelectionDebug(type, {
+            instanceId: debugInstanceId,
+            modelUri: editor.getModel()?.uri.toString() ?? null,
+            ...payload,
+        })
     }
 
     const margin = element.querySelector('.monaco-editor .margin')
@@ -185,16 +213,17 @@ export const editorTouchSelectionHelp = (
     const _dynamicMenuItems: { el: HTMLDivElement, fn: () => string | Element }[] = []
     // Suppress auto-hide while a right-click or touch-handle flow opens the menus.
     let _menuGuard = false
-    let activeDragCleanup: (() => void) | null = null
-    const cancelActiveDrag = () => {
+    let activeDragDebug: {dragId: number, handle: 'left' | 'right'} | null = null
+    let activeDragCleanup: ((reason: string) => void) | null = null
+    const cancelActiveDrag = (reason = 'cancelled') => {
         const cleanup = activeDragCleanup
         activeDragCleanup = null
-        cleanup?.()
+        cleanup?.(reason)
         _menuGuard = false
     }
-    const cancelDragOnWindowBlur = () => cancelActiveDrag()
+    const cancelDragOnWindowBlur = () => cancelActiveDrag('window-blur')
     const cancelDragWhenHidden = () => {
-        if (document.hidden) cancelActiveDrag()
+        if (document.hidden) cancelActiveDrag('document-hidden')
     }
     window.addEventListener('blur', cancelDragOnWindowBlur)
     document.addEventListener('visibilitychange', cancelDragWhenHidden)
@@ -210,12 +239,16 @@ export const editorTouchSelectionHelp = (
         selectorMenuShow = true
         selectorMenuStack.classList.add('show')
     }
+    const forceHideSelectorMenu = () => {
+        if (!selectorMenuStack) return
+        selectorMenuShow = false
+        selectorMenuStack.classList.remove('show')
+    }
     const hideSelectorMenu = () => {
         if (!selectorMenuStack) return
         if (!selectorMenuShow) return
         if (_menuGuard) return
-        selectorMenuShow = false
-        selectorMenuStack.classList.remove('show')
+        forceHideSelectorMenu()
     }
 
     const positionSelectorMenus = (
@@ -267,7 +300,8 @@ export const editorTouchSelectionHelp = (
     resizeOb.observe(element)
 
     editor.onDidDispose(() => {
-        cancelActiveDrag()
+        cancelActiveDrag('editor-dispose')
+        unregisterTouchSelectionDebugInstance(debugInstanceId)
         window.removeEventListener('blur', cancelDragOnWindowBlur)
         document.removeEventListener('visibilitychange', cancelDragWhenHidden)
         if (menuOutsideMouseDownHandler) {
@@ -375,18 +409,70 @@ export const editorTouchSelectionHelp = (
         })
     }
 
-    const resolveTouchPosition = (clientX: number, clientY: number): IPosition | null => {
+    const resolveTouchPosition = (
+        clientX: number,
+        clientY: number,
+        debugContext?: {dragId: number, sampleId: number, source: string},
+    ): IPosition | null => {
+        const debugEnabled = isTouchSelectionDebugEnabled()
         const target = editor.getTargetAtClientPoint(clientX, clientY)
-        if (!target?.position) return null
+        const targetSummary = debugEnabled && target ? {
+            type: target.type,
+            mouseColumn: target.mouseColumn,
+            position: describeDebugPosition(target.position),
+            range: describeDebugSelection(target.range),
+        } : null
+        const debugBase = debugEnabled ? {
+            ...debugContext,
+            clientX,
+            clientY,
+            target: targetSummary,
+            hitStack: describeDebugHitStack(clientX, clientY),
+        } : null
+        const recordResolution = (
+            outcome: string,
+            position: IPosition | null,
+            details?: () => Record<string, unknown>,
+        ) => {
+            if (!debugBase) return
+            recordDebug('resolve', {
+                ...debugBase,
+                outcome,
+                resolvedPosition: describeDebugPosition(position),
+                ...(details?.() ?? {}),
+            })
+        }
+        if (!target?.position) {
+            recordResolution('target-missing', null)
+            return null
+        }
 
         const model = editor.getModel()
-        if (!model) return target.position
+        if (!model) {
+            recordResolution('fallback-model-missing', target.position)
+            return target.position
+        }
 
         const lineNumber = target.position.lineNumber
         const maxColumn = model.getLineMaxColumn(lineNumber)
         const layout = editor.getLayoutInfo()
         const editorRect = element.getBoundingClientRect()
         const targetOffset = clientX - editorRect.left - layout.contentLeft + editor.getScrollLeft()
+        const geometry = debugEnabled ? {
+            editorRect: describeDebugRect(editorRect),
+            contentLeft: layout.contentLeft,
+            contentWidth: layout.contentWidth,
+            targetOffset,
+            scrollLeft: editor.getScrollLeft(),
+            scrollTop: editor.getScrollTop(),
+            visualViewport: window.visualViewport ? {
+                offsetLeft: window.visualViewport.offsetLeft,
+                offsetTop: window.visualViewport.offsetTop,
+                width: window.visualViewport.width,
+                height: window.visualViewport.height,
+                scale: window.visualViewport.scale,
+            } : null,
+        } : null
 
         // Resolve against every rendered caret boundary in the visual row. The
         // point target chooses the row only; it is not the horizontal authority.
@@ -397,17 +483,36 @@ export const editorTouchSelectionHelp = (
             const rowEnd = editor.getTargetAtClientPoint(contentRight, clientY)?.position
 
             if (rowStart?.lineNumber !== lineNumber || rowEnd?.lineNumber !== lineNumber) {
+                recordResolution('fallback-row-bounds', target.position, () => ({
+                    geometry,
+                    lineNumber,
+                    maxColumn,
+                    rowStart: describeDebugPosition(rowStart),
+                    rowEnd: describeDebugPosition(rowEnd),
+                }))
                 return target.position
             }
             let low = Math.min(rowStart.column, rowEnd.column, target.position.column)
             let high = Math.max(rowStart.column, rowEnd.column, target.position.column)
             low = Math.max(1, low)
             high = Math.min(maxColumn, high)
+            const searchLow = low
+            const searchHigh = high
 
             while (low < high) {
                 const middle = Math.floor((low + high) / 2)
                 const offset = editor.getOffsetForColumn(lineNumber, middle)
-                if (offset < 0) return target.position
+                if (offset < 0) {
+                    recordResolution('fallback-search-offset', target.position, () => ({
+                        geometry,
+                        lineNumber,
+                        column: middle,
+                        offset,
+                        searchLow,
+                        searchHigh,
+                    }))
+                    return target.position
+                }
                 if (offset < targetOffset) low = middle + 1
                 else high = middle
             }
@@ -416,13 +521,58 @@ export const editorTouchSelectionHelp = (
             const leftColumn = Math.max(1, rightColumn - 1)
             const rightOffset = editor.getOffsetForColumn(lineNumber, rightColumn)
             const leftOffset = editor.getOffsetForColumn(lineNumber, leftColumn)
-            if (rightOffset < 0 || leftOffset < 0) return target.position
+            if (rightOffset < 0 || leftOffset < 0) {
+                recordResolution('fallback-final-offset', target.position, () => ({
+                    geometry,
+                    lineNumber,
+                    leftColumn,
+                    leftOffset,
+                    rightColumn,
+                    rightOffset,
+                    searchLow,
+                    searchHigh,
+                }))
+                return target.position
+            }
 
             const column = Math.abs(targetOffset - leftOffset) <= Math.abs(rightOffset - targetOffset)
                 ? leftColumn
                 : rightColumn
-            return {lineNumber, column}
-        } catch (_error) {
+            const position = {lineNumber, column}
+            const candidateOffsets: {column: number, offset: number, distance: number}[] = []
+            if (debugEnabled) {
+                const radius = getTouchSelectionDebugCandidateRadius()
+                const candidateStart = Math.max(1, leftColumn - radius)
+                const candidateEnd = Math.min(maxColumn, rightColumn + radius)
+                for (let candidateColumn = candidateStart; candidateColumn <= candidateEnd; candidateColumn++) {
+                    const offset = editor.getOffsetForColumn(lineNumber, candidateColumn)
+                    candidateOffsets.push({
+                        column: candidateColumn,
+                        offset,
+                        distance: offset < 0 ? -1 : Math.abs(targetOffset - offset),
+                    })
+                }
+            }
+            recordResolution('resolved', position, () => ({
+                geometry,
+                lineNumber,
+                maxColumn,
+                rowStart: describeDebugPosition(rowStart),
+                rowEnd: describeDebugPosition(rowEnd),
+                searchLow,
+                searchHigh,
+                leftColumn,
+                leftOffset,
+                rightColumn,
+                rightOffset,
+                candidateOffsets,
+            }))
+            return position
+        } catch (error) {
+            recordResolution('fallback-exception', target.position, () => ({
+                geometry,
+                error: error instanceof Error ? error.message : String(error),
+            }))
             return target.position
         }
     }
@@ -648,10 +798,22 @@ export const editorTouchSelectionHelp = (
 
                 let touch = event.changedTouches[0] ?? event.touches[0]
                 if (!touch) return
-                cancelActiveDrag()
+                cancelActiveDrag('replaced')
+                const previousMenuWasVisible = selectorMenuShow
+                forceHideSelectorMenu()
+                const handle = selector.classList.contains('left') ? 'left' : 'right'
+                const dragId = nextTouchSelectionDebugDragId()
+                const recordDragDebug = (type: string, payload: () => Record<string, unknown>) => {
+                    if (isTouchSelectionDebugEnabled()) recordDebug(type, payload())
+                }
+                activeDragDebug = {dragId, handle}
                 _menuGuard = true
                 clearTimeout(syncSelectorTimer)
                 syncSelectorTimer = undefined
+                const initialSelectorRect = isTouchSelectionDebugEnabled()
+                    ? selector.getBoundingClientRect()
+                    : null
+                selections?.classList.add('dragging')
                 if (leftSelector) leftSelector.style.opacity = "0"
                 if (rightSelector) rightSelector.style.opacity = "0"
 
@@ -671,21 +833,81 @@ export const editorTouchSelectionHelp = (
                     }
                 } catch (_e) { /* ignore */ }
 
+                recordDragDebug('drag-start', () => ({
+                    dragId,
+                    handle,
+                    eventTimestamp: event.timeStamp,
+                    touch: describeDebugTouch(touch),
+                    initialSelection: describeDebugSelection(initialSelection),
+                    selectorRect: describeDebugRect(initialSelectorRect),
+                    leftSelectorRect: describeDebugRect(leftSelector?.getBoundingClientRect()),
+                    rightSelectorRect: describeDebugRect(rightSelector?.getBoundingClientRect()),
+                    touchOffsetY,
+                    lineHeight,
+                    fontSize,
+                    previousMenuWasVisible,
+                    menuVisibleAtStart: selectorMenuShow,
+                    handleHitTestingDisabled: selections?.classList.contains('dragging') ?? false,
+                    rawHitStack: describeDebugHitStack(touch.clientX, touch.clientY),
+                }))
+
                 // Don't start the drag interval until the finger actually moves.
                 // This lets taps and long-presses work without the interval
                 // immediately repositioning the cursor.
                 let revealTimer: ReturnType<typeof setInterval> | null = null
                 let touchMoved = false
-                const applyTouchPosition = () => {
+                let moveCount = 0
+                let sampledMoveCount = 0
+                let sampleId = 0
+                let latestMoveAt = performance.now()
+                const applyTouchPosition = (source: string, currentSampleId: number) => {
+                    const resolverX = touch.clientX
+                    const resolverY = touch.clientY + touchOffsetY - lineHeight * 1.5
                     const position = resolveTouchPosition(
-                        touch.clientX,
-                        touch.clientY + touchOffsetY - lineHeight * 1.5,
+                        resolverX,
+                        resolverY,
+                        {dragId, sampleId: currentSampleId, source},
                     )
-                    if (!position) return
+                    if (!position) {
+                        recordDragDebug('selection-write', () => ({
+                            dragId,
+                            sampleId: currentSampleId,
+                            source,
+                            handle,
+                            outcome: 'position-missing',
+                            touch: describeDebugTouch(touch),
+                            resolverX,
+                            resolverY,
+                            selection: describeDebugSelection(editor.getSelection()),
+                        }))
+                        return
+                    }
                     if (selectionIsEmpty) {
                         const current = editor.getPosition()
-                        if (current?.lineNumber === position.lineNumber && current.column === position.column) return
+                        if (current?.lineNumber === position.lineNumber && current.column === position.column) {
+                            recordDragDebug('selection-write', () => ({
+                                dragId,
+                                sampleId: currentSampleId,
+                                source,
+                                handle,
+                                outcome: 'duplicate-position',
+                                resolvedPosition: describeDebugPosition(position),
+                                currentPosition: describeDebugPosition(current),
+                            }))
+                            return
+                        }
                         editor.setPosition(position)
+                        recordDragDebug('selection-write', () => ({
+                            dragId,
+                            sampleId: currentSampleId,
+                            source,
+                            handle,
+                            outcome: 'position-applied',
+                            resolvedPosition: describeDebugPosition(position),
+                            beforePosition: describeDebugPosition(current),
+                            afterPosition: describeDebugPosition(editor.getPosition()),
+                            afterSelection: describeDebugSelection(editor.getSelection()),
+                        }))
                     } else {
                         const nextSelection = updateSelection(initialSelection, position)
                         const current = editor.getSelection()
@@ -694,14 +916,61 @@ export const editorTouchSelectionHelp = (
                             current.startColumn === nextSelection.startColumn &&
                             current.endLineNumber === nextSelection.endLineNumber &&
                             current.endColumn === nextSelection.endColumn
-                        ) return
+                        ) {
+                            recordDragDebug('selection-write', () => ({
+                                dragId,
+                                sampleId: currentSampleId,
+                                source,
+                                handle,
+                                outcome: 'duplicate-selection',
+                                resolvedPosition: describeDebugPosition(position),
+                                currentSelection: describeDebugSelection(current),
+                                proposedSelection: describeDebugSelection(nextSelection),
+                            }))
+                            return
+                        }
                         editor.setSelection(nextSelection)
+                        recordDragDebug('selection-write', () => ({
+                            dragId,
+                            sampleId: currentSampleId,
+                            source,
+                            handle,
+                            outcome: 'selection-applied',
+                            resolvedPosition: describeDebugPosition(position),
+                            initialSelection: describeDebugSelection(initialSelection),
+                            beforeSelection: describeDebugSelection(current),
+                            proposedSelection: describeDebugSelection(nextSelection),
+                            afterSelection: describeDebugSelection(editor.getSelection()),
+                        }))
                     }
                 }
                 const sampleTouchPosition = () => {
+                    sampleId += 1
+                    const debugEnabled = isTouchSelectionDebugEnabled()
+                    const sampledAt = debugEnabled ? performance.now() : 0
+                    const scrollBefore = debugEnabled ? {
+                        left: editor.getScrollLeft(),
+                        top: editor.getScrollTop(),
+                    } : null
                     scrollTopExtremityFit(editor, touch, lineHeight)
                     scrollLeftExtremityFit(editor, touch, fontSize)
-                    applyTouchPosition()
+                    const scrollAfter = debugEnabled ? {
+                        left: editor.getScrollLeft(),
+                        top: editor.getScrollTop(),
+                    } : null
+                    recordDragDebug('drag-sample', () => ({
+                        dragId,
+                        sampleId,
+                        handle,
+                        touch: describeDebugTouch(touch),
+                        moveCount,
+                        movesSincePreviousSample: moveCount - sampledMoveCount,
+                        inputAgeMs: sampledAt - latestMoveAt,
+                        scrollBefore,
+                        scrollAfter,
+                    }))
+                    sampledMoveCount = moveCount
+                    applyTouchPosition('sample', sampleId)
                 }
                 const startRevealTimer = () => {
                     if (revealTimer !== null) return
@@ -713,11 +982,25 @@ export const editorTouchSelectionHelp = (
                     event.preventDefault()
                     touch = event.changedTouches[0] ?? event.touches[0] ?? touch
                     touchMoved = true
+                    moveCount += 1
+                    latestMoveAt = performance.now()
+                    if (shouldCaptureTouchSelectionMoves()) {
+                        recordDebug('touch-move', {
+                            dragId,
+                            handle,
+                            moveCount,
+                            eventTimestamp: event.timeStamp,
+                            touches: event.touches.length,
+                            changedTouches: event.changedTouches.length,
+                            touch: describeDebugTouch(touch),
+                            rawHitStack: describeDebugHitStack(touch.clientX, touch.clientY),
+                        })
+                    }
                     startRevealTimer()
                 }
 
                 let cleaned = false
-                const cleanup = () => {
+                const cleanup = (reason: string) => {
                     if (cleaned) return
                     cleaned = true
                     if (revealTimer !== null) clearInterval(revealTimer)
@@ -726,15 +1009,39 @@ export const editorTouchSelectionHelp = (
                     document.removeEventListener('touchend', handleEnd)
                     document.removeEventListener('touchcancel', handleEnd)
                     if (activeDragCleanup === cleanup) activeDragCleanup = null
+                    selections?.classList.remove('dragging')
                     const selection = editor.getSelection()
                     if (selection) syncSelectionTransform(selection)
+                    recordDragDebug('drag-cleanup', () => ({
+                        dragId,
+                        handle,
+                        reason,
+                        moveCount,
+                        sampleCount: sampleId,
+                        finalTouch: describeDebugTouch(touch),
+                        finalSelection: describeDebugSelection(selection),
+                        leftSelectorRect: describeDebugRect(leftSelector?.getBoundingClientRect()),
+                        rightSelectorRect: describeDebugRect(rightSelector?.getBoundingClientRect()),
+                    }))
+                    if (activeDragDebug?.dragId === dragId) activeDragDebug = null
                 }
 
                 const handleEnd = (event: TouchEvent) => {
                     if (event.type !== 'touchcancel') event.preventDefault()
                     touch = event.changedTouches[0] ?? event.touches[0] ?? touch
-                    if (touchMoved) applyTouchPosition()
-                    cleanup()
+                    recordDragDebug('touch-end', () => ({
+                        dragId,
+                        handle,
+                        eventType: event.type,
+                        eventTimestamp: event.timeStamp,
+                        touchMoved,
+                        touch: describeDebugTouch(touch),
+                    }))
+                    if (touchMoved) {
+                        sampleId += 1
+                        applyTouchPosition('end', sampleId)
+                    }
+                    cleanup(event.type)
 
                     const selection = editor.getSelection()
                     if (event.type !== 'touchcancel' && selectorMenu && selection !== null) {
@@ -796,6 +1103,15 @@ export const editorTouchSelectionHelp = (
     }
 
     editor.onDidChangeCursorSelection((e) => {
+        if (activeDragDebug && isTouchSelectionDebugEnabled()) {
+            recordDebug('cursor-selection-event', {
+                dragId: activeDragDebug.dragId,
+                handle: activeDragDebug.handle,
+                source: e.source,
+                reason: e.reason,
+                selection: describeDebugSelection(e.selection),
+            })
+        }
         hideSelectorMenu()
         if (activeDragCleanup) return
         setTimeout(() => {
