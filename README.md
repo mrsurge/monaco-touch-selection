@@ -38,6 +38,9 @@ Give your editor to `editorTouchSelectionHelp`.
 ```typescript
 declare const editorTouchSelectionHelp: (editor: ICodeEditor, options?: {
     tools?: SelectorMenuToolConfig
+    leadingTools?: SelectorMenuToolConfig
+    navigationTools?: SelectorMenuToolConfig
+    mobile?: boolean
     selectionSyncTimeout?: number | undefined
     toolActionErrorHandler?: (name: string, error: Error | unknown) => Promise<void> | void
 }) => void
@@ -228,13 +231,27 @@ te2 console eval --worker main_page:<worker-suffix> --code \
 - Mount floating menus at the document root and clamp only to the visual
   viewport. Keep the menu above Code TE2's Explorer, sidebar, menubar, and
   toolbar while the touch handles remain in Monaco's lower content layer.
-- Keep the centered single-island adjustment row touch-origin only. Desktop
-  right-click opens the main row without adjustment controls, while handle
-  release opens shrink-left, grow-left, grow-right, and shrink-right above it.
-- Keep the touch adjustment row flush with the main row and let their shared
-  root stack consume seam touches. The rows retain the original 2.4rem control
-  size and overlap by one border pixel so the boundary cannot expose a dead hit
-  gap or dismiss the menu.
+- Anchor a touch-selection menu above the visually higher handle, regardless
+  of which handle ended the drag. While Monaco scrolls, temporarily hide that
+  selection-bound menu and restore it only after scroll settling plus one
+  render frame.
+- When the upper handle scrolls above Monaco, pin the menu immediately above
+  Monaco's top edge so it can overlap the host menubar. When the complete
+  selection is below Monaco, pin the menu just inside the editor's bottom edge.
+  A selection spanning the viewport uses the top-edge position.
+- Keep leading tools mobile-only. In mobile touch mode, leading tools,
+  shrink/grow adjustment tools, and navigation tools share one utility row,
+  with the outer islands aligned to the main menu below. Desktop keeps
+  navigation centered above the main row and hides leading and adjustment
+  controls.
+- Keep the utility row flush with the main row and let their shared root stack
+  consume seam touches. The rows retain the original 2.4rem control size and
+  overlap by one border pixel so the boundary cannot expose a dead hit gap or
+  dismiss the menu.
+- Dispatch `monaco-touch-selection:open-menu` on the editor DOM to open the
+  selector menu at the current caret. The optional `detail.touchMode` flag
+  defaults to `true`, allowing external mobile controls to request the same
+  menu without synthesizing screen coordinates.
 - Grow and shrink operate on normalized Monaco range edges one model position at
   a time. Shrink stops once the selection is empty.
 - The teardrops intentionally retain their smaller visual size while pseudo
@@ -257,4 +274,5 @@ git diff --check
 Live validation should cover a sustained handle drag, column-by-column
 placement, edge auto-scroll, interrupted drag cleanup, menu placement near all
 viewport edges, drawer/sidebar occlusion, all four edge-adjustment actions,
-seam mis-taps, touch menu activation, and desktop right-click behavior.
+seam mis-taps, touch menu activation, scroll-time hiding and restoration,
+off-screen selection pinning, and desktop right-click behavior.

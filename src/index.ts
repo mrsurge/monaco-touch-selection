@@ -29,6 +29,8 @@ const DEFAULT_SELECTION_SYNC_TIMEOUT = 300
 const DBLCLICK_OPEN_MENU_TIMEOUT = 1000
 const REVEAL_INTERVAL = 50
 const TOUCH_CONTEXT_MENU_WINDOW = 2000
+const SELECTION_MENU_SCROLL_SETTLE_TIMEOUT = 90
+export const OPEN_SELECTOR_MENU_EVENT = 'monaco-touch-selection:open-menu'
 
 export type SelectorMenuTool = {
     name: string,
@@ -140,12 +142,18 @@ export const editorTouchSelectionHelp = (
     editor: ICodeEditor,
     options?: {
         tools?: SelectorMenuToolConfig,
+        leadingTools?: SelectorMenuToolConfig,
+        navigationTools?: SelectorMenuToolConfig,
+        mobile?: boolean,
         selectionSyncTimeout?: number | undefined,
         toolActionErrorHandler?: (name: string, error: Error | unknown) => Promise<void> | void,
     }
 ) => {
     const {
         tools,
+        leadingTools,
+        navigationTools,
+        mobile = false,
         selectionSyncTimeout = DEFAULT_SELECTION_SYNC_TIMEOUT,
         toolActionErrorHandler = (name: string, error: Error | unknown) => {
             console.error(`tool ${name} cause error: `, error)
@@ -205,10 +213,16 @@ export const editorTouchSelectionHelp = (
 
     let selectorMenuShow = false
     let selectorMenuStack: HTMLDivElement | null = null
+    let selectorUtilityMenuRow: HTMLDivElement | null = null
     let selectorMenu: HTMLDivElement | null = null
+    let selectorLeadingMenu: HTMLDivElement | null = null
+    let selectorNavigationMenu: HTMLDivElement | null = null
     let selectorAdjustmentMenu: HTMLDivElement | null = null
     let menuOutsideMouseDownHandler: ((event: MouseEvent) => void) | null = null
     let lastTouchInteractionAt = 0
+    let selectorMenuBoundToSelection = false
+    let selectorMenuScrollTimer: number | undefined = undefined
+    let selectorMenuScrollFrame: number | undefined = undefined
     // Track menu items with dynamic (function) innerHTML for refresh on show.
     const _dynamicMenuItems: { el: HTMLDivElement, fn: () => string | Element }[] = []
     // Suppress auto-hide while a right-click or touch-handle flow opens the menus.
@@ -239,8 +253,22 @@ export const editorTouchSelectionHelp = (
         selectorMenuShow = true
         selectorMenuStack.classList.add('show')
     }
+    const clearSelectorMenuScrollRestore = () => {
+        clearTimeout(selectorMenuScrollTimer)
+        selectorMenuScrollTimer = undefined
+        if (selectorMenuScrollFrame !== undefined) {
+            cancelAnimationFrame(selectorMenuScrollFrame)
+            selectorMenuScrollFrame = undefined
+        }
+        selectorMenuStack?.classList.remove('scroll-repositioning')
+    }
+    const unbindSelectorMenuFromSelection = () => {
+        selectorMenuBoundToSelection = false
+        clearSelectorMenuScrollRestore()
+    }
     const forceHideSelectorMenu = () => {
         if (!selectorMenuStack) return
+        unbindSelectorMenuFromSelection()
         selectorMenuShow = false
         selectorMenuStack.classList.remove('show')
     }
@@ -256,6 +284,7 @@ export const editorTouchSelectionHelp = (
         preferredAboveY: number,
         fallbackBelowY: number,
         touchMode: boolean,
+        edge: 'none' | 'top' | 'bottom' = 'none',
     ) => {
         if (!selectorMenuStack) return
         selectorMenuStack.classList.toggle('touch-mode', touchMode)
@@ -283,12 +312,101 @@ export const editorTouchSelectionHelp = (
         const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max))
 
         const stackX = clamp(anchorX - stackWidth / 2, minX, maxX - stackWidth)
-        let stackY = preferredAboveY - stackHeight
-        if (stackY < minY) stackY = fallbackBelowY
+        let stackY
+        if (edge === 'bottom') {
+            stackY = fallbackBelowY - stackHeight
+        } else {
+            stackY = preferredAboveY - stackHeight
+            if (edge === 'none' && stackY < minY) stackY = fallbackBelowY
+        }
         stackY = clamp(stackY, minY, maxY - stackHeight)
 
         selectorMenuStack.style.transform = `translateX(${stackX}px) translateY(${stackY}px)`
     }
+
+    const positionSelectorMenuForSelection = (): boolean => {
+        if (!mobile || !selectorMenuStack || !leftSelector || !rightSelector || !selectionsShow) {
+            return false
+        }
+        if (!editor.getSelection()) return false
+
+        // Rendered handle geometry remains authoritative for wrapped lines and
+        // selections whose logical direction differs from their visual order.
+        const editorRect = element.getBoundingClientRect()
+        const leftRect = leftSelector.getBoundingClientRect()
+        const rightRect = rightSelector.getBoundingClientRect()
+        const upperRect = leftRect.top <= rightRect.top ? leftRect : rightRect
+        const anchorX = upperRect.left + upperRect.width / 2
+        const lineHeight = editor.getOption(OPTION_LineHeight)
+
+        selectorMenuBoundToSelection = true
+        if (upperRect.top < editorRect.top) {
+            positionSelectorMenus(anchorX, editorRect.top, editorRect.top, true, 'top')
+        } else if (upperRect.top >= editorRect.bottom) {
+            positionSelectorMenus(anchorX, editorRect.bottom, editorRect.bottom, true, 'bottom')
+        } else {
+            positionSelectorMenus(
+                anchorX,
+                upperRect.top,
+                upperRect.bottom + lineHeight,
+                true,
+            )
+        }
+        return true
+    }
+
+    const scheduleSelectorMenuRestoreAfterScroll = () => {
+        if (!selectorMenuBoundToSelection || !selectorMenuShow || !selectorMenuStack) return
+
+        // Keep the stack measurable but non-interactive until Monaco has
+        // committed the final handle transform for this scroll sequence.
+        selectorMenuStack.classList.add('scroll-repositioning')
+        clearTimeout(selectorMenuScrollTimer)
+        if (selectorMenuScrollFrame !== undefined) {
+            cancelAnimationFrame(selectorMenuScrollFrame)
+            selectorMenuScrollFrame = undefined
+        }
+        selectorMenuScrollTimer = window.setTimeout(() => {
+            selectorMenuScrollTimer = undefined
+            selectorMenuScrollFrame = requestAnimationFrame(() => {
+                selectorMenuScrollFrame = undefined
+                if (!selectorMenuBoundToSelection || !selectorMenuShow) {
+                    selectorMenuStack?.classList.remove('scroll-repositioning')
+                    return
+                }
+                if (!positionSelectorMenuForSelection()) {
+                    forceHideSelectorMenu()
+                    return
+                }
+                selectorMenuStack?.classList.remove('scroll-repositioning')
+            })
+        }, SELECTION_MENU_SCROLL_SETTLE_TIMEOUT)
+    }
+
+    const openSelectorMenuAtCursor = (touchMode = true) => {
+        if (!selectorMenuStack) return
+        const rect = element.getBoundingClientRect()
+        const position = editor.getPosition()
+        const visible = position ? editor.getScrolledVisiblePosition(position) : null
+        const clientX = visible
+            ? rect.left + visible.left
+            : rect.left + rect.width / 2
+        const clientY = visible
+            ? rect.top + visible.top + visible.height
+            : rect.top + rect.height / 2
+
+        _menuGuard = true
+        if (!touchMode || !positionSelectorMenuForSelection()) {
+            unbindSelectorMenuFromSelection()
+            positionSelectorMenus(clientX, clientY - 10, clientY + 10, touchMode)
+        }
+        setTimeout(() => { _menuGuard = false }, 0)
+    }
+    const openSelectorMenuEventHandler = (event: Event) => {
+        const detail = (event as CustomEvent<{touchMode?: boolean}>).detail
+        openSelectorMenuAtCursor(detail?.touchMode !== false)
+    }
+    element.addEventListener(OPEN_SELECTOR_MENU_EVENT, openSelectorMenuEventHandler)
 
     let resizeOb: ResizeObserver | null = new ResizeObserver(() => {
         hideSelections()
@@ -301,9 +419,11 @@ export const editorTouchSelectionHelp = (
 
     editor.onDidDispose(() => {
         cancelActiveDrag('editor-dispose')
+        clearSelectorMenuScrollRestore()
         unregisterTouchSelectionDebugInstance(debugInstanceId)
         window.removeEventListener('blur', cancelDragOnWindowBlur)
         document.removeEventListener('visibilitychange', cancelDragWhenHidden)
+        element.removeEventListener(OPEN_SELECTOR_MENU_EVENT, openSelectorMenuEventHandler)
         if (menuOutsideMouseDownHandler) {
             document.removeEventListener('mousedown', menuOutsideMouseDownHandler)
             menuOutsideMouseDownHandler = null
@@ -320,7 +440,10 @@ export const editorTouchSelectionHelp = (
         leftSelector = null
         rightSelector = null
         selectorMenuStack = null
+        selectorUtilityMenuRow = null
         selectorMenu = null
+        selectorLeadingMenu = null
+        selectorNavigationMenu = null
         selectorAdjustmentMenu = null
     })
 
@@ -762,35 +885,14 @@ export const editorTouchSelectionHelp = (
                 selections.style.top = `-${e.scrollTop}px`
                 selections.style.left = `-${e.scrollLeft}px`
             }
+            scheduleSelectorMenuRestoreAfterScroll()
         })
 
         const setupSelectorTouchEvent = (
             selector: Selector,
             updateSelection: (selection: IRange, position: IPosition) => IRange
         ) => {
-            const showSelectionMenuByTouch = (touch: Touch) => {
-                if (touch && leftSelector && rightSelector) {
-                    const leftRect = leftSelector.getBoundingClientRect()
-                    const rightRect = rightSelector.getBoundingClientRect()
-
-                    // 计算 touch 点到 left selector 的距离
-                    const leftDistancePow2 = Math.pow(touch.clientX - (leftRect.left + leftRect.width / 2), 2) +
-                        Math.pow(touch.clientY - (leftRect.top + leftRect.height / 2), 2)
-
-                    // 计算 touch 点到 right selector 的距离
-                    const rightDistancePow2 = Math.pow(touch.clientX - (rightRect.left + rightRect.width / 2), 2) +
-                        Math.pow(touch.clientY - (rightRect.top + rightRect.height / 2), 2)
-
-                    // 选择距离更近的 selector
-                    const closerRect = leftDistancePow2 <= rightDistancePow2 ? leftRect : rightRect;
-                    positionSelectorMenus(
-                        closerRect.left + closerRect.width / 2,
-                        closerRect.top,
-                        closerRect.bottom + lineHeight,
-                        true,
-                    )
-                }
-            }
+            const showSelectionMenuByTouch = () => positionSelectorMenuForSelection()
 
             selector.addEventListener('touchstart', (event: TouchEvent) => {
                 const initialSelection = editor.getSelection()
@@ -1045,7 +1147,7 @@ export const editorTouchSelectionHelp = (
 
                     const selection = editor.getSelection()
                     if (event.type !== 'touchcancel' && selectorMenu && selection !== null) {
-                        showSelectionMenuByTouch(touch)
+                        showSelectionMenuByTouch()
                     }
 
                     setTimeout(() => { _menuGuard = false }, 0)
@@ -1200,7 +1302,9 @@ export const editorTouchSelectionHelp = (
     ])
 
     const getMenuTools = (
-        selectorMenu: HTMLDivElement
+        selectorMenu: HTMLDivElement,
+        configuredTools: SelectorMenuToolConfig | undefined = tools,
+        useDefaultTools = true,
     ): Iterable<SelectorMenuTool> => {
         const defaultTools: Map<DefaultToolName, SelectorMenuTool> = new Map([
             [DefaultToolName.Copy, {
@@ -1436,10 +1540,12 @@ export const editorTouchSelectionHelp = (
             .filter(([name]) => !selectionAdjustmentTools.has(name) && !selectionShrinkTools.has(name))
             .map(([, tool]) => tool)
 
-        if (tools === undefined) return mainTools()
+        if (configuredTools === undefined) {
+            return useDefaultTools ? mainTools() : []
+        }
 
-        if (typeof tools === 'function') {
-            const result = tools({
+        if (typeof configuredTools === 'function') {
+            const result = configuredTools({
                 editor,
                 selectorMenu,
                 defaultTools,
@@ -1447,25 +1553,40 @@ export const editorTouchSelectionHelp = (
                 closeMenu: hideSelectorMenu,
             })
             if (result === undefined) {
-                return mainTools()
+                return useDefaultTools ? mainTools() : []
             }
             return result
         }
 
-        return mainTools()
+        return useDefaultTools ? mainTools() : []
     }
 
     const initSelectorMenu = () => {
         selectorMenuStack = document.createElement('div')
         selectorMenuStack.classList.add('monaco-editor-touch-selector-menu-stack')
+        selectorMenuStack.classList.toggle('mobile-mode', mobile)
+
+        selectorUtilityMenuRow = document.createElement('div')
+        selectorUtilityMenuRow.classList.add('utility-row')
 
         selectorMenu = document.createElement('div')
         selectorMenu.classList.add('monaco-editor-touch-selector-menu', 'main-menu')
 
+        selectorLeadingMenu = document.createElement('div')
+        selectorLeadingMenu.classList.add('monaco-editor-touch-selector-menu', 'leading-row')
+
+        selectorNavigationMenu = document.createElement('div')
+        selectorNavigationMenu.classList.add('monaco-editor-touch-selector-menu', 'navigation-row')
+
         selectorAdjustmentMenu = document.createElement('div')
         selectorAdjustmentMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-adjustment-row')
 
-        selectorMenuStack.append(selectorAdjustmentMenu, selectorMenu)
+        selectorUtilityMenuRow.append(
+            selectorNavigationMenu,
+            selectorLeadingMenu,
+            selectorAdjustmentMenu,
+        )
+        selectorMenuStack.append(selectorUtilityMenuRow, selectorMenu)
 
         const appendMenuTools = (
             menu: HTMLDivElement,
@@ -1476,6 +1597,9 @@ export const editorTouchSelectionHelp = (
                 const menuItemElement = document.createElement('div')
                 menuItemElement.classList.add('menu-item')
                 menuItemElement.title = menuTool.name
+                menuItemElement.setAttribute('role', 'button')
+                menuItemElement.setAttribute('aria-label', menuTool.name)
+                menuItemElement.tabIndex = 0
 
                 if (typeof menuTool.innerHTML === 'function') {
                     const result = menuTool.innerHTML()
@@ -1498,11 +1622,26 @@ export const editorTouchSelectionHelp = (
                 }
                 menuItemElement.addEventListener('touchend', runAction)
                 menuItemElement.addEventListener('click', runAction)
+                menuItemElement.addEventListener('keydown', (event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return
+                    event.preventDefault()
+                    void runAction()
+                })
 
                 menu.appendChild(menuItemElement)
             }
         }
         appendMenuTools(selectorMenu, getMenuTools(selectorMenu), true)
+        appendMenuTools(
+            selectorLeadingMenu,
+            getMenuTools(selectorLeadingMenu, leadingTools, false),
+            true,
+        )
+        appendMenuTools(
+            selectorNavigationMenu,
+            getMenuTools(selectorNavigationMenu, navigationTools, false),
+            true,
+        )
         const shrinkLeftTool = selectionShrinkTools.get(DefaultToolName.ShrinkSelectionLeft)
         const shrinkRightTool = selectionShrinkTools.get(DefaultToolName.ShrinkSelectionRight)
         if (shrinkLeftTool) appendMenuTools(selectorAdjustmentMenu, [shrinkLeftTool], false)
@@ -1533,8 +1672,7 @@ export const editorTouchSelectionHelp = (
         menuOutsideMouseDownHandler = (event: MouseEvent) => {
             if (!selectorMenuShow || !selectorMenuStack) return
             if (selectorMenuStack.contains(event.target as Node)) return
-            selectorMenuShow = false
-            selectorMenuStack.classList.remove('show')
+            forceHideSelectorMenu()
         }
         document.addEventListener('mousedown', menuOutsideMouseDownHandler)
 
@@ -1581,7 +1719,10 @@ export const editorTouchSelectionHelp = (
         }).sourceCapabilities
         const touchOrigin = sourceCapabilities?.firesTouchEvents === true
             || Date.now() - lastTouchInteractionAt <= TOUCH_CONTEXT_MENU_WINDOW
-        positionSelectorMenus(event.clientX, event.clientY - 10, event.clientY + 10, touchOrigin)
+        if (!touchOrigin || !positionSelectorMenuForSelection()) {
+            unbindSelectorMenuFromSelection()
+            positionSelectorMenus(event.clientX, event.clientY - 10, event.clientY + 10, touchOrigin)
+        }
 
         // Release guard after current event loop so blur/selection handlers don't fire.
         setTimeout(() => { _menuGuard = false }, 0)
