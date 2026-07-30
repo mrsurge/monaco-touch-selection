@@ -217,7 +217,6 @@ export const editorTouchSelectionHelp = (
     let selectorMenu: HTMLDivElement | null = null
     let selectorLeadingMenu: HTMLDivElement | null = null
     let selectorNavigationMenu: HTMLDivElement | null = null
-    let selectorAdjustmentMenu: HTMLDivElement | null = null
     let menuOutsideMouseDownHandler: ((event: MouseEvent) => void) | null = null
     let lastTouchInteractionAt = 0
     let selectorMenuBoundToSelection = false
@@ -444,7 +443,6 @@ export const editorTouchSelectionHelp = (
         selectorMenu = null
         selectorLeadingMenu = null
         selectorNavigationMenu = null
-        selectorAdjustmentMenu = null
     })
 
     const selectAll = () => {
@@ -1578,13 +1576,9 @@ export const editorTouchSelectionHelp = (
         selectorNavigationMenu = document.createElement('div')
         selectorNavigationMenu.classList.add('monaco-editor-touch-selector-menu', 'navigation-row')
 
-        selectorAdjustmentMenu = document.createElement('div')
-        selectorAdjustmentMenu.classList.add('monaco-editor-touch-selector-menu', 'selection-adjustment-row')
-
         selectorUtilityMenuRow.append(
-            selectorNavigationMenu,
             selectorLeadingMenu,
-            selectorAdjustmentMenu,
+            selectorNavigationMenu,
         )
         selectorMenuStack.append(selectorUtilityMenuRow, selectorMenu)
 
@@ -1642,12 +1636,6 @@ export const editorTouchSelectionHelp = (
             getMenuTools(selectorNavigationMenu, navigationTools, false),
             true,
         )
-        const shrinkLeftTool = selectionShrinkTools.get(DefaultToolName.ShrinkSelectionLeft)
-        const shrinkRightTool = selectionShrinkTools.get(DefaultToolName.ShrinkSelectionRight)
-        if (shrinkLeftTool) appendMenuTools(selectorAdjustmentMenu, [shrinkLeftTool], false)
-        appendMenuTools(selectorAdjustmentMenu, selectionAdjustmentTools.values(), false)
-        if (shrinkRightTool) appendMenuTools(selectorAdjustmentMenu, [shrinkRightTool], false)
-
         const setupMenuEvents = (menu: HTMLDivElement) => {
             menu.addEventListener('touchstart', (event) => {
                 event.preventDefault()

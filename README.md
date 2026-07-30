@@ -239,11 +239,10 @@ te2 console eval --worker main_page:<worker-suffix> --code \
   Monaco's top edge so it can overlap the host menubar. When the complete
   selection is below Monaco, pin the menu just inside the editor's bottom edge.
   A selection spanning the viewport uses the top-edge position.
-- Keep leading tools mobile-only. In mobile touch mode, leading tools,
-  shrink/grow adjustment tools, and navigation tools share one utility row,
-  with the outer islands aligned to the main menu below. Desktop keeps
-  navigation centered above the main row and hides leading and adjustment
-  controls.
+- Keep leading tools mobile-only. In mobile touch mode, the leading and
+  navigation tools remain separate islands but are centered by their combined
+  width in one utility row. Desktop keeps navigation centered above the main
+  row and hides leading controls.
 - Keep the utility row flush with the main row and let their shared root stack
   consume seam touches. The rows retain the original 2.4rem control size and
   overlap by one border pixel so the boundary cannot expose a dead hit gap or
@@ -252,8 +251,8 @@ te2 console eval --worker main_page:<worker-suffix> --code \
   selector menu at the current caret. The optional `detail.touchMode` flag
   defaults to `true`, allowing external mobile controls to request the same
   menu without synthesizing screen coordinates.
-- Grow and shrink operate on normalized Monaco range edges one model position at
-  a time. Shrink stops once the selection is empty.
+- Grow and shrink remain available as tool primitives for custom integrations,
+  but the default mobile menu does not mount a selection-adjustment island.
 - The teardrops intentionally retain their smaller visual size while pseudo
   elements expand the bottom target by 14px and the cursor-bar target to 32px.
 - Modify touch-target sizing and menu presentation in `src/style.css`, then
