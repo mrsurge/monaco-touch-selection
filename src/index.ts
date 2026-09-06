@@ -188,12 +188,6 @@ export const editorTouchSelectionHelp = (
         })
     }
 
-    const margin = element.querySelector('.monaco-editor .margin')
-    let leftMargin = 0
-    if (margin && margin instanceof HTMLElement) {
-        leftMargin = margin.offsetWidth
-    }
-
     let selectionsShow = false
     let selections: HTMLDivElement | null = null
     let leftSelector: Selector | null = null
@@ -769,6 +763,7 @@ export const editorTouchSelectionHelp = (
 
         // Get the position of the start and end of the selection in client coordinates
         const scrollLeft = editor.getScrollLeft()
+        const scrollTop = editor.getScrollTop()
         const startCoords = editor.getScrolledVisiblePosition(startPosition)
         const endCoords = editor.getScrolledVisiblePosition(endPosition)
 
@@ -778,10 +773,15 @@ export const editorTouchSelectionHelp = (
         const startTop = editor.getTopForPosition(startPosition.lineNumber, startPosition.column)
         const endTop = editor.getTopForPosition(endPosition.lineNumber, endPosition.column)
 
-        // Calculate positions for the selectors based on line number top positions
-        const leftSelectorX = startCoords.left + scrollLeft - leftMargin
+        // Monaco positions include the gutter. The overlay is rooted at the
+        // editor origin and translates document coordinates by the scroll offset.
+        if (selections) {
+            selections.style.top = `-${scrollTop}px`
+            selections.style.left = `-${scrollLeft}px`
+        }
+        const leftSelectorX = startCoords.left + scrollLeft
         const leftSelectorY = startTop
-        const rightSelectorX = endCoords.left + scrollLeft - leftMargin
+        const rightSelectorX = endCoords.left + scrollLeft
         const rightSelectorY = endTop
 
         leftSelector.style.opacity = "1"
@@ -878,6 +878,13 @@ export const editorTouchSelectionHelp = (
         })
 
         editorOverlayGuard.append(selections)
+        const syncCurrentSelection = () => {
+            const selection = editor.getSelection()
+            if (selection) debounceSyncSelectionTransform(selection)
+        }
+        editor.onDidLayoutChange(syncCurrentSelection)
+        editor.onDidContentSizeChange(syncCurrentSelection)
+        syncCurrentSelection()
         editor.onDidScrollChange((e) => {
             if (selections) {
                 selections.style.top = `-${e.scrollTop}px`
