@@ -145,6 +145,7 @@ export const editorTouchSelectionHelp = (
         leadingTools?: SelectorMenuToolConfig,
         navigationTools?: SelectorMenuToolConfig,
         mobile?: boolean,
+        historicalReadOnly?: boolean,
         selectionSyncTimeout?: number | undefined,
         toolActionErrorHandler?: (name: string, error: Error | unknown) => Promise<void> | void,
     }
@@ -154,6 +155,7 @@ export const editorTouchSelectionHelp = (
         leadingTools,
         navigationTools,
         mobile = false,
+        historicalReadOnly = false,
         selectionSyncTimeout = DEFAULT_SELECTION_SYNC_TIMEOUT,
         toolActionErrorHandler = (name: string, error: Error | unknown) => {
             console.error(`tool ${name} cause error: `, error)
@@ -1544,6 +1546,14 @@ export const editorTouchSelectionHelp = (
         const mainTools = () => Array.from(defaultTools)
             .filter(([name]) => !selectionAdjustmentTools.has(name) && !selectionShrinkTools.has(name))
             .map(([, tool]) => tool)
+
+        // Historical viewers retain selection geometry, but cannot expose editing
+        // tools (including the read-only toggle) through defaults or custom islands.
+        if (historicalReadOnly) {
+            return useDefaultTools ? [DefaultToolName.Copy, DefaultToolName.SelectWord,
+                DefaultToolName.SelectAll, DefaultToolName.Find, DefaultToolName.Close]
+                .map(name => defaultTools.get(name)!) : []
+        }
 
         if (configuredTools === undefined) {
             return useDefaultTools ? mainTools() : []
