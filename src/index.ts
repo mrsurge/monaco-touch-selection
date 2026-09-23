@@ -26,7 +26,7 @@ const OPTION_FontSize_FALLBACK = 52
 const OPTION_LineHeight_FALLBACK = 67
 
 const DEFAULT_SELECTION_SYNC_TIMEOUT = 300
-const DBLCLICK_OPEN_MENU_TIMEOUT = 1000
+const DOUBLE_TAP_HANDLE_DELAY = 450
 const REVEAL_INTERVAL = 50
 const TOUCH_CONTEXT_MENU_WINDOW = 2000
 const SELECTION_MENU_SCROLL_SETTLE_TIMEOUT = 90
@@ -192,6 +192,20 @@ export const editorTouchSelectionHelp = (
 
     let selectionsShow = false
     let selections: HTMLDivElement | null = null
+    let handleHitTimer: ReturnType<typeof setTimeout> | undefined
+    // The first tap may create a caret handle directly over the second tap.
+    // Keep it visible but inert until Monaco's double-tap window has closed.
+    const deferCaretHandle = () => {
+        clearTimeout(handleHitTimer)
+        selections?.classList.add('tap-pending')
+        handleHitTimer = setTimeout(() => {
+            selections?.classList.remove('tap-pending')
+        }, DOUBLE_TAP_HANDLE_DELAY)
+    }
+    const releaseHandleDelay = () => {
+        clearTimeout(handleHitTimer)
+        selections?.classList.remove('tap-pending')
+    }
     let leftSelector: Selector | null = null
     let rightSelector: Selector | null = null
     const showSelections = () => {
@@ -413,6 +427,7 @@ export const editorTouchSelectionHelp = (
     resizeOb.observe(element)
 
     editor.onDidDispose(() => {
+        clearTimeout(handleHitTimer)
         cancelActiveDrag('editor-dispose')
         clearSelectorMenuScrollRestore()
         unregisterTouchSelectionDebugInstance(debugInstanceId)
@@ -788,6 +803,7 @@ export const editorTouchSelectionHelp = (
 
         leftSelector.style.opacity = "1"
         rightSelector.style.opacity = "1"
+        selections?.classList.remove('position-pending')
 
         leftSelector.style.transform = `translateX(${leftSelectorX}px) translateY(${leftSelectorY}px)`
         rightSelector.style.transform = `translateX(${rightSelectorX}px) translateY(${rightSelectorY}px)`
@@ -812,6 +828,7 @@ export const editorTouchSelectionHelp = (
             lastSyncTime = currentSyncTime
             leftSelector.style.opacity = "0"
             rightSelector.style.opacity = "0"
+            selections?.classList.add('position-pending')
             syncSelectorTimer = window.setTimeout(() => {
                 syncSelectionTransform(selection)
             }, selectionSyncTimeout)
@@ -901,7 +918,7 @@ export const editorTouchSelectionHelp = (
         ) => {
             const showSelectionMenuByTouch = () => positionSelectorMenuForSelection()
 
-            selector.addEventListener('touchstart', (event: TouchEvent) => {
+            selector.bottomCursor.addEventListener('touchstart', (event: TouchEvent) => {
                 const initialSelection = editor.getSelection()
                 if (!initialSelection) return
 
@@ -1170,48 +1187,13 @@ export const editorTouchSelectionHelp = (
         setupSelectorTouchEvent(leftSelector, updateSelectionStart)
         setupSelectorTouchEvent(rightSelector, updateSelectionEnd)
 
-        const setupTextCursorSelectWord = (textSelector: HTMLDivElement) => {
-            let lastTouchTime = 0
-
-            textSelector.addEventListener('touchstart', () => {
-                lastTouchTime = Date.now()
-            }, {passive: true})
-
-            textSelector.addEventListener('touchend', () => {
-                if (Date.now() - lastTouchTime > DBLCLICK_OPEN_MENU_TIMEOUT) {
-                    return
-                }
-
-                const selection = editor.getSelection()
-                if (!selection) return
-                if (selection?.startColumn !== selection.endColumn || selection.startLineNumber !== selection.endLineNumber) return
-
-                const model = editor.getModel()
-                if (!model) return
-
-                const word = model.getWordAtPosition(selection.getStartPosition())
-                if (word) {
-                    editor.setSelection({
-                        startLineNumber: selection.startLineNumber,
-                        startColumn: word.startColumn,
-                        endLineNumber: selection.endLineNumber,
-                        endColumn: word.endColumn,
-                    })
-                    setTimeout(() => {
-                        editor.focus()
-                    })
-                }
-            }, {passive: true})
-        }
-
-        setupTextCursorSelectWord(leftSelector.textCursor)
-        setupTextCursorSelectWord(rightSelector.textCursor)
-
         const selection = editor.getSelection()
         if (selection) debounceSyncSelectionTransform(selection)
     }
 
     editor.onDidChangeCursorSelection((e) => {
+        if (!e.selection.isEmpty()) releaseHandleDelay()
+        else if (!activeDragCleanup && Date.now() - lastTouchInteractionAt < 1000) deferCaretHandle()
         if (activeDragDebug && isTouchSelectionDebugEnabled()) {
             recordDebug('cursor-selection-event', {
                 dragId: activeDragDebug.dragId,
@@ -1685,8 +1667,23 @@ export const editorTouchSelectionHelp = (
     }
     initSelectorMenu()
 
-    element.addEventListener('touchstart', () => {
+    // Monaco owns word selection and reports a completed hold without focusing
+    // its textarea. This contribution only presents the existing touch menu.
+    const holdSubscription = editor.onContextMenu((event) => {
+        if (event.event.browserEvent.type !== '-monaco-gesturehold') return
+        releaseHandleDelay()
+        showSelections()
+        const selection = editor.getSelection()
+        if (selection) syncSelectionTransform(selection)
+        positionSelectorMenuForSelection()
+    })
+    editor.onDidDispose(() => holdSubscription.dispose())
+
+    element.addEventListener('touchstart', (event) => {
         lastTouchInteractionAt = Date.now()
+        if (!(event.target instanceof Element && event.target.closest('.bottom-cursor'))) {
+            deferCaretHandle()
+        }
         showSelections()
     }, {passive: true})
 
@@ -1705,6 +1702,14 @@ export const editorTouchSelectionHelp = (
         event.stopPropagation()
         if (!selectorMenuStack) return
 
+        const sourceCapabilities = (event as MouseEvent & {
+            sourceCapabilities?: { firesTouchEvents?: boolean }
+        }).sourceCapabilities
+        const touchOrigin = sourceCapabilities?.firesTouchEvents === true
+            || Date.now() - lastTouchInteractionAt <= TOUCH_CONTEXT_MENU_WINDOW
+        // Native contextmenu duplicates the source-owned hold on some engines.
+        if (touchOrigin) return
+
         // Guard: prevent onDidChangeCursorSelection / onDidBlurEditorWidget from
         // immediately hiding the menu we're about to show.
         _menuGuard = true
@@ -1719,11 +1724,6 @@ export const editorTouchSelectionHelp = (
             }
         }
 
-        const sourceCapabilities = (event as MouseEvent & {
-            sourceCapabilities?: { firesTouchEvents?: boolean }
-        }).sourceCapabilities
-        const touchOrigin = sourceCapabilities?.firesTouchEvents === true
-            || Date.now() - lastTouchInteractionAt <= TOUCH_CONTEXT_MENU_WINDOW
         if (!touchOrigin || !positionSelectorMenuForSelection()) {
             unbindSelectorMenuFromSelection()
             positionSelectorMenus(event.clientX, event.clientY - 10, event.clientY + 10, touchOrigin)
