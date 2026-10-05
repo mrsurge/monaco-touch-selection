@@ -138,7 +138,7 @@ const scrollLeftExtremityFit = (editor: ICodeEditor, touch: Touch, letterWidth: 
     }
 }
 
-export const editorTouchSelectionHelp = (
+const attachTouchSelectionView = (
     editor: ICodeEditor,
     options?: {
         tools?: SelectorMenuToolConfig,
@@ -182,6 +182,9 @@ export const editorTouchSelectionHelp = (
     }
 
     const debugInstanceId = registerTouchSelectionDebugInstance()
+    let disposed = false
+    const subscriptions: {dispose(): void}[] = []
+    const viewEvents = new AbortController()
     const recordDebug = (type: string, payload: Record<string, unknown> = {}) => {
         recordTouchSelectionDebug(type, {
             instanceId: debugInstanceId,
@@ -415,7 +418,7 @@ export const editorTouchSelectionHelp = (
         const detail = (event as CustomEvent<{touchMode?: boolean}>).detail
         openSelectorMenuAtCursor(detail?.touchMode !== false)
     }
-    element.addEventListener(OPEN_SELECTOR_MENU_EVENT, openSelectorMenuEventHandler)
+    element.addEventListener(OPEN_SELECTOR_MENU_EVENT, openSelectorMenuEventHandler, {signal: viewEvents.signal})
 
     let resizeOb: ResizeObserver | null = new ResizeObserver(() => {
         hideSelections()
@@ -426,7 +429,12 @@ export const editorTouchSelectionHelp = (
     })
     resizeOb.observe(element)
 
-    editor.onDidDispose(() => {
+    const dispose = () => {
+        if (disposed) return
+        disposed = true
+        viewEvents.abort()
+        for (const subscription of subscriptions) subscription.dispose()
+        clearTimeout(syncSelectorTimer)
         clearTimeout(handleHitTimer)
         cancelActiveDrag('editor-dispose')
         clearSelectorMenuScrollRestore()
@@ -454,7 +462,7 @@ export const editorTouchSelectionHelp = (
         selectorMenu = null
         selectorLeadingMenu = null
         selectorNavigationMenu = null
-    })
+    }
 
     const selectAll = () => {
         editor.focus()
@@ -888,29 +896,29 @@ export const editorTouchSelectionHelp = (
             }
         }
         syncSelectorStyle(lineHeight)
-        editor.onDidChangeConfiguration((e) => {
+        subscriptions.push(editor.onDidChangeConfiguration((e) => {
             lineHeight = editor.getOption(OPTION_LineHeight)
             syncSelectorStyle(lineHeight)
             if (e.hasChanged(OPTION_FontSize)) {
                 fontSize = editor.getOption(OPTION_FontSize)
             }
-        })
+        }))
 
         editorOverlayGuard.append(selections)
         const syncCurrentSelection = () => {
             const selection = editor.getSelection()
             if (selection) debounceSyncSelectionTransform(selection)
         }
-        editor.onDidLayoutChange(syncCurrentSelection)
-        editor.onDidContentSizeChange(syncCurrentSelection)
+        subscriptions.push(editor.onDidLayoutChange(syncCurrentSelection))
+        subscriptions.push(editor.onDidContentSizeChange(syncCurrentSelection))
         syncCurrentSelection()
-        editor.onDidScrollChange((e) => {
+        subscriptions.push(editor.onDidScrollChange((e) => {
             if (selections) {
                 selections.style.top = `-${e.scrollTop}px`
                 selections.style.left = `-${e.scrollLeft}px`
             }
             scheduleSelectorMenuRestoreAfterScroll()
-        })
+        }))
 
         const setupSelectorTouchEvent = (
             selector: Selector,
@@ -1191,7 +1199,7 @@ export const editorTouchSelectionHelp = (
         if (selection) debounceSyncSelectionTransform(selection)
     }
 
-    editor.onDidChangeCursorSelection((e) => {
+    subscriptions.push(editor.onDidChangeCursorSelection((e) => {
         if (!e.selection.isEmpty()) releaseHandleDelay()
         else if (!activeDragCleanup && Date.now() - lastTouchInteractionAt < 1000) deferCaretHandle()
         if (activeDragDebug && isTouchSelectionDebugEnabled()) {
@@ -1206,9 +1214,10 @@ export const editorTouchSelectionHelp = (
         hideSelectorMenu()
         if (activeDragCleanup) return
         setTimeout(() => {
+            if (disposed) return
             debounceSyncSelectionTransform(e.selection)
         }, 0)
-    })
+    }))
 
     initSelections()
 
@@ -1677,7 +1686,7 @@ export const editorTouchSelectionHelp = (
         if (selection) syncSelectionTransform(selection)
         positionSelectorMenuForSelection()
     })
-    editor.onDidDispose(() => holdSubscription.dispose())
+    subscriptions.push(holdSubscription)
 
     element.addEventListener('touchstart', (event) => {
         lastTouchInteractionAt = Date.now()
@@ -1685,16 +1694,16 @@ export const editorTouchSelectionHelp = (
             deferCaretHandle()
         }
         showSelections()
-    }, {passive: true})
+    }, {passive: true, signal: viewEvents.signal})
 
-    editor.onDidBlurEditorWidget(() => {
+    subscriptions.push(editor.onDidBlurEditorWidget(() => {
         hideSelections()
         hideSelectorMenu()
-    })
+    }))
 
     element.addEventListener('click', (event) => {
         event.stopPropagation()
-    })
+    }, {signal: viewEvents.signal})
 
     // Right-click (mouse) opens the selector menu at the cursor position.
     element.addEventListener('contextmenu', (event: MouseEvent) => {
@@ -1731,5 +1740,42 @@ export const editorTouchSelectionHelp = (
 
         // Release guard after current event loop so blur/selection handlers don't fire.
         setTimeout(() => { _menuGuard = false }, 0)
+    }, {signal: viewEvents.signal})
+    return {dispose}
+}
+
+// Monaco keeps the editor alive while replacing its view DOM on setModel().
+// Editor-owned subscriptions must not keep menus attached to the old view alive.
+const touchOwners = new WeakMap<ICodeEditor, {refresh(): void}>()
+export const editorTouchSelectionHelp = (
+    editor: ICodeEditor,
+    options?: Parameters<typeof attachTouchSelectionView>[1],
+): void => {
+    const existing = touchOwners.get(editor)
+    if (existing) {
+        existing.refresh()
+        return
+    }
+    let view: ReturnType<typeof attachTouchSelectionView> | null = null
+    let element: HTMLElement | null = null
+    const refresh = () => {
+        const nextElement = editor.getDomNode()
+        if (nextElement === element) return
+        view?.dispose()
+        view = null
+        element = null
+        if (nextElement) view = attachTouchSelectionView(editor, options)
+        element = nextElement
+    }
+    refresh()
+    touchOwners.set(editor, {refresh})
+    const modelSubscription = editor.onDidChangeModel(refresh)
+    const disposeSubscription = editor.onDidDispose(() => {
+        view?.dispose()
+        view = null
+        element = null
+        modelSubscription.dispose()
+        disposeSubscription.dispose()
+        touchOwners.delete(editor)
     })
 }
