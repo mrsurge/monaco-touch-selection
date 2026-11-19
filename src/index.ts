@@ -21,6 +21,7 @@ export {
 } from "./debug.js"
 
 type ICodeEditor = editor.ICodeEditor;
+import { createSelectionLens } from './selection-lens.js'
 
 const OPTION_FontSize_FALLBACK = 52
 const OPTION_LineHeight_FALLBACK = 67
@@ -933,6 +934,7 @@ const attachTouchSelectionView = (
                 let touch = event.changedTouches[0] ?? event.touches[0]
                 if (!touch) return
                 cancelActiveDrag('replaced')
+                const lens = createSelectionLens(editor, editorOverlayGuard)
                 const previousMenuWasVisible = selectorMenuShow
                 forceHideSelectorMenu()
                 const handle = selector.classList.contains('left') ? 'left' : 'right'
@@ -953,8 +955,8 @@ const attachTouchSelectionView = (
 
                 const selectionIsEmpty = initialSelection.isEmpty()
 
-                // Keep the handle's vertical grab offset while horizontal placement
-                // follows the raw touch coordinate without spatial magnification.
+                // Preserve the point actually grabbed, in client coordinates.
+                let touchOffsetX = 0
                 let touchOffsetY = 0
                 try {
                     const anchorPos = selector.classList.contains('left')
@@ -963,7 +965,10 @@ const attachTouchSelectionView = (
                     const scrolledPos = editor.getScrolledVisiblePosition(anchorPos)
                     if (scrolledPos) {
                         const editorRect = element.getBoundingClientRect()
-                        touchOffsetY = editorRect.top + scrolledPos.top + scrolledPos.height / 2 - touch.clientY
+                        const sx = element.offsetWidth ? editorRect.width / element.offsetWidth : 1
+                        const sy = element.offsetHeight ? editorRect.height / element.offsetHeight : 1
+                        touchOffsetX = editorRect.left + scrolledPos.left * sx - touch.clientX
+                        touchOffsetY = editorRect.top + (scrolledPos.top + scrolledPos.height / 2) * sy - touch.clientY
                     }
                 } catch (_e) { /* ignore */ }
 
@@ -977,6 +982,7 @@ const attachTouchSelectionView = (
                     leftSelectorRect: describeDebugRect(leftSelector?.getBoundingClientRect()),
                     rightSelectorRect: describeDebugRect(rightSelector?.getBoundingClientRect()),
                     touchOffsetY,
+                    touchOffsetX,
                     lineHeight,
                     fontSize,
                     previousMenuWasVisible,
@@ -995,8 +1001,8 @@ const attachTouchSelectionView = (
                 let sampleId = 0
                 let latestMoveAt = performance.now()
                 const applyTouchPosition = (source: string, currentSampleId: number) => {
-                    const resolverX = touch.clientX
-                    const resolverY = touch.clientY + touchOffsetY - lineHeight * 1.5
+                    const resolverX = touch.clientX + touchOffsetX
+                    const resolverY = touch.clientY + touchOffsetY
                     const position = resolveTouchPosition(
                         resolverX,
                         resolverY,
@@ -1016,6 +1022,7 @@ const attachTouchSelectionView = (
                         }))
                         return
                     }
+                    lens.update(position, touch.clientY)
                     if (selectionIsEmpty) {
                         const current = editor.getPosition()
                         if (current?.lineNumber === position.lineNumber && current.column === position.column) {
@@ -1137,6 +1144,7 @@ const attachTouchSelectionView = (
                 const cleanup = (reason: string) => {
                     if (cleaned) return
                     cleaned = true
+                    lens.dispose()
                     if (revealTimer !== null) clearInterval(revealTimer)
                     revealTimer = null
                     document.removeEventListener('touchmove', handleMove)
