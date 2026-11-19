@@ -28,7 +28,9 @@ const OPTION_LineHeight_FALLBACK = 67
 
 const DEFAULT_SELECTION_SYNC_TIMEOUT = 300
 const DOUBLE_TAP_HANDLE_DELAY = 450
+const HANDLE_PULSE_MS = 100
 const REVEAL_INTERVAL = 50
+const HANDLE_IDLE_MS = 75
 const TOUCH_CONTEXT_MENU_WINDOW = 2000
 const SELECTION_MENU_SCROLL_SETTLE_TIMEOUT = 90
 export const OPEN_SELECTOR_MENU_EVENT = 'monaco-touch-selection:open-menu'
@@ -935,6 +937,22 @@ const attachTouchSelectionView = (
                 if (!touch) return
                 cancelActiveDrag('replaced')
                 const lens = createSelectionLens(editor, editorOverlayGuard)
+                let fingerMovedSinceSample = false
+                let stopTimer: ReturnType<typeof setTimeout> | undefined
+                const stopHaptics = () => {
+                    if (stopTimer === undefined) return
+                    clearTimeout(stopTimer)
+                    stopTimer = undefined
+                    try { navigator.vibrate?.(0) } catch { /* Client may have suspended haptics. */ }
+                }
+                const pulseOnJump = () => {
+                    if (!fingerMovedSinceSample || !navigator.vibrate) return
+                    try {
+                        navigator.vibrate(HANDLE_PULSE_MS)
+                        clearTimeout(stopTimer)
+                        stopTimer = setTimeout(stopHaptics, HANDLE_IDLE_MS)
+                    } catch { /* Haptics are optional. */ }
+                }
                 const previousMenuWasVisible = selectorMenuShow
                 forceHideSelectorMenu()
                 const handle = selector.classList.contains('left') ? 'left' : 'right'
@@ -1038,6 +1056,7 @@ const attachTouchSelectionView = (
                             return
                         }
                         editor.setPosition(position)
+                        if (source !== 'end') pulseOnJump()
                         recordDragDebug('selection-write', () => ({
                             dragId,
                             sampleId: currentSampleId,
@@ -1071,6 +1090,7 @@ const attachTouchSelectionView = (
                             return
                         }
                         editor.setSelection(nextSelection)
+                        if (source !== 'end') pulseOnJump()
                         recordDragDebug('selection-write', () => ({
                             dragId,
                             sampleId: currentSampleId,
@@ -1112,6 +1132,7 @@ const attachTouchSelectionView = (
                     }))
                     sampledMoveCount = moveCount
                     applyTouchPosition('sample', sampleId)
+                    fingerMovedSinceSample = false
                 }
                 const startRevealTimer = () => {
                     if (revealTimer !== null) return
@@ -1121,7 +1142,9 @@ const attachTouchSelectionView = (
 
                 const handleMove = (event: TouchEvent) => {
                     event.preventDefault()
-                    touch = event.changedTouches[0] ?? event.touches[0] ?? touch
+                    const moved = event.changedTouches[0] ?? event.touches[0] ?? touch
+                    if (touch.clientX !== moved.clientX || touch.clientY !== moved.clientY) fingerMovedSinceSample = true
+                    touch = moved
                     touchMoved = true
                     moveCount += 1
                     latestMoveAt = performance.now()
@@ -1144,6 +1167,7 @@ const attachTouchSelectionView = (
                 const cleanup = (reason: string) => {
                     if (cleaned) return
                     cleaned = true
+                    stopHaptics()
                     lens.dispose()
                     if (revealTimer !== null) clearInterval(revealTimer)
                     revealTimer = null
