@@ -25,7 +25,14 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
             return y >= r.top && y < r.bottom
         })
         if (!row) { lens.hidden = true; return }
-        if (!lens.isConnected) host.append(lens)
+        if (!lens.isConnected) {
+            const theme = getComputedStyle(host)
+            for (const name of ['--vscode-editor-background', '--vscode-editor-foreground',
+                '--vscode-editorWidget-border', '--vscode-editorCursor-foreground']) {
+                lens.style.setProperty(name, theme.getPropertyValue(name))
+            }
+            document.documentElement.append(lens)
+        }
         lens.hidden = false
         if (row.firstChild !== previous) {
             sample.replaceChildren(...Array.from(row.childNodes, n => n.cloneNode(true)))
@@ -46,11 +53,14 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
         }
         const offset = pos.left - (row.getBoundingClientRect().left - box.left) / sx
         sample.style.transform = `translate(${-offset * scale}px,-50%) scale(${scale})`
-        const x = Math.min(Math.max(0, pos.left - lens.offsetWidth / 2), host.clientWidth - lens.offsetWidth)
-        const above = pos.top - lens.offsetHeight - 12
-        const below = (fingerY - box.top) / sy + 24
-        lens.style.left = Math.max(0, x) + 'px'
-        lens.style.top = Math.max(0, Math.min(host.clientHeight - lens.offsetHeight, above >= 0 ? above : below)) + 'px'
+        const viewport = window.visualViewport
+        const left = viewport?.offsetLeft ?? 0, top = viewport?.offsetTop ?? 0
+        const right = left + (viewport?.width ?? window.innerWidth)
+        const bottom = top + (viewport?.height ?? window.innerHeight)
+        const x = box.left + pos.left * sx - lens.offsetWidth / 2
+        const above = box.top + pos.top * sy - lens.offsetHeight - 12
+        lens.style.left = Math.max(left, Math.min(x, right - lens.offsetWidth)) + 'px'
+        lens.style.top = Math.max(top, Math.min(above >= top ? above : fingerY + 24, bottom - lens.offsetHeight)) + 'px'
     }
     return {
         update(position: IPosition, clientY: number) {
