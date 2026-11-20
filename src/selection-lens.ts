@@ -7,7 +7,10 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
     lens.setAttribute('aria-hidden', 'true')
     const sample = document.createElement('div')
     sample.className = 'monaco-touch-selection-sample'
-    lens.append(sample)
+    const selectionLayer = document.createElement('div')
+    const caret = document.createElement('div')
+    caret.className = 'monaco-touch-lens-caret'
+    lens.append(selectionLayer, sample, caret)
     let frame = 0
     let previous: Node | null = null
     let latest: IPosition
@@ -28,13 +31,14 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
         if (!lens.isConnected) {
             const theme = getComputedStyle(host)
             for (const name of ['--vscode-editor-background', '--vscode-editor-foreground',
-                '--vscode-editorWidget-border', '--vscode-editorCursor-foreground']) {
+                '--vscode-editorWidget-border', '--vscode-editorCursor-foreground', '--vscode-editorCursor-background']) {
                 lens.style.setProperty(name, theme.getPropertyValue(name))
             }
             document.documentElement.append(lens)
         }
         lens.hidden = false
-        if (row.firstChild !== previous) {
+        const shape = control.getRawOptions().cursorStyle ?? 'line'
+        if (row.firstChild !== previous || caret.dataset.shape !== shape) {
             sample.replaceChildren(...Array.from(row.childNodes, n => n.cloneNode(true)))
             // The copy lives outside .view-lines, so Monaco's descendant rules
             // no longer apply. Copy longhands: Chromium can return an empty
@@ -50,9 +54,38 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
                 }
             }
             previous = row.firstChild
+            caret.replaceChildren()
+            if (shape === 'block') caret.append(sample.cloneNode(true))
+            caret.dataset.shape = shape
         }
         const offset = pos.left - (row.getBoundingClientRect().left - box.left) / sx
         sample.style.transform = `translate(${-offset * scale}px,-50%) scale(${scale})`
+        const next = control.getScrolledVisiblePosition({ lineNumber: latest.lineNumber, column: latest.column + 1 })
+        const cell = next && next.top === pos.top && next.left > pos.left
+            ? next.left - pos.left : Number.parseFloat(getComputedStyle(row).fontSize) * 0.6
+        caret.style.width = (shape.startsWith('block') ? cell : (control.getRawOptions().cursorWidth || 2)) * scale + 'px'
+        caret.style.height = pos.height * scale + 'px'
+        const glyph = caret.firstElementChild
+        if (glyph instanceof HTMLElement) glyph.style.transform = sample.style.transform
+        selectionLayer.replaceChildren()
+        const selection = control.getSelection()
+        if (selection && !selection.isEmpty()) {
+            const anchorX = box.left + pos.left * sx
+            for (const segment of host.querySelectorAll<HTMLElement>('.view-overlays .selected-text')) {
+                // Monaco paints a filler followed by a background mask to round
+                // an interior corner. Only the actual selected ranges belong in the lens.
+                if (segment.nextElementSibling?.matches('.cslr.monaco-editor-background')) continue
+                const rect = segment.getBoundingClientRect()
+                if (y < rect.top || y >= rect.bottom) continue
+                const mark = document.createElement('div')
+                mark.className = 'monaco-touch-lens-selection'
+                mark.style.left = `calc(50% + ${(rect.left - anchorX) / sx * scale}px)`
+                mark.style.width = rect.width / sx * scale + 'px'
+                mark.style.height = pos.height * scale + 'px'
+                mark.style.backgroundColor = getComputedStyle(segment).backgroundColor
+                selectionLayer.append(mark)
+            }
+        }
         const viewport = window.visualViewport
         const left = viewport?.offsetLeft ?? 0, top = viewport?.offsetTop ?? 0
         const right = left + (viewport?.width ?? window.innerWidth)

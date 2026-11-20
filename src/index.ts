@@ -75,6 +75,18 @@ type Selector = HTMLDivElement & {
     textCursor: HTMLDivElement,
 }
 
+// Monaco reports ranges in document order. The dragged handle can cross its
+// fixed anchor, so the proposed endpoints may arrive in either order.
+const sameSelectedRange = (current: IRange | null, next: IRange): boolean => {
+    if (!current) return false
+    const reversed = next.startLineNumber > next.endLineNumber ||
+        (next.startLineNumber === next.endLineNumber && next.startColumn > next.endColumn)
+    return current.startLineNumber === (reversed ? next.endLineNumber : next.startLineNumber) &&
+        current.startColumn === (reversed ? next.endColumn : next.startColumn) &&
+        current.endLineNumber === (reversed ? next.startLineNumber : next.endLineNumber) &&
+        current.endColumn === (reversed ? next.startColumn : next.endColumn)
+}
+
 const updateSelectionStart = (selection: IRange, position: IPosition): IRange => {
     return {
         startLineNumber: position.lineNumber,
@@ -1074,12 +1086,7 @@ const attachTouchSelectionView = (
                     } else {
                         const nextSelection = updateSelection(initialSelection, position)
                         const current = editor.getSelection()
-                        if (
-                            current?.startLineNumber === nextSelection.startLineNumber &&
-                            current.startColumn === nextSelection.startColumn &&
-                            current.endLineNumber === nextSelection.endLineNumber &&
-                            current.endColumn === nextSelection.endColumn
-                        ) {
+                        if (sameSelectedRange(current, nextSelection)) {
                             recordDragDebug('selection-write', () => ({
                                 dragId,
                                 sampleId: currentSampleId,
