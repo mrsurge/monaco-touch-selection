@@ -28,7 +28,7 @@ const OPTION_LineHeight_FALLBACK = 67
 
 const DEFAULT_SELECTION_SYNC_TIMEOUT = 300
 const DOUBLE_TAP_HANDLE_DELAY = 450
-const HANDLE_PULSE_MS = 100
+const DEFAULT_HANDLE_PULSE_MS = 1
 const REVEAL_INTERVAL = 50
 const HANDLE_IDLE_MS = 75
 const TOUCH_CONTEXT_MENU_WINDOW = 2000
@@ -149,6 +149,7 @@ const attachTouchSelectionView = (
         navigationTools?: SelectorMenuToolConfig,
         mobile?: boolean,
         historicalReadOnly?: boolean,
+        getHandleFeedback?: () => { magnifier: boolean; vibrationMs: number },
         selectionSyncTimeout?: number | undefined,
         toolActionErrorHandler?: (name: string, error: Error | unknown) => Promise<void> | void,
     }
@@ -936,7 +937,9 @@ const attachTouchSelectionView = (
                 let touch = event.changedTouches[0] ?? event.touches[0]
                 if (!touch) return
                 cancelActiveDrag('replaced')
-                const lens = createSelectionLens(editor, editorOverlayGuard)
+                const feedback = options?.getHandleFeedback?.()
+                const lens = feedback?.magnifier === false ? null : createSelectionLens(editor, editorOverlayGuard)
+                const duration = feedback?.vibrationMs ?? DEFAULT_HANDLE_PULSE_MS
                 let fingerMovedSinceSample = false
                 let stopTimer: ReturnType<typeof setTimeout> | undefined
                 const stopHaptics = () => {
@@ -946,9 +949,9 @@ const attachTouchSelectionView = (
                     try { navigator.vibrate?.(0) } catch { /* Client may have suspended haptics. */ }
                 }
                 const pulseOnJump = () => {
-                    if (!fingerMovedSinceSample || !navigator.vibrate) return
+                    if (!fingerMovedSinceSample || duration <= 0 || !navigator.vibrate) return
                     try {
-                        navigator.vibrate(HANDLE_PULSE_MS)
+                        navigator.vibrate(duration)
                         clearTimeout(stopTimer)
                         stopTimer = setTimeout(stopHaptics, HANDLE_IDLE_MS)
                     } catch { /* Haptics are optional. */ }
@@ -1040,7 +1043,7 @@ const attachTouchSelectionView = (
                         }))
                         return
                     }
-                    lens.update(position, touch.clientY)
+                    lens?.update(position, touch.clientY)
                     if (selectionIsEmpty) {
                         const current = editor.getPosition()
                         if (current?.lineNumber === position.lineNumber && current.column === position.column) {
@@ -1168,7 +1171,7 @@ const attachTouchSelectionView = (
                     if (cleaned) return
                     cleaned = true
                     stopHaptics()
-                    lens.dispose()
+                    lens?.dispose()
                     if (revealTimer !== null) clearInterval(revealTimer)
                     revealTimer = null
                     document.removeEventListener('touchmove', handleMove)
@@ -1715,6 +1718,12 @@ const attachTouchSelectionView = (
         releaseHandleDelay()
         showSelections()
         const selection = editor.getSelection()
+        if (mobile && selection && !selection.isEmpty()) {
+            const duration = options?.getHandleFeedback?.().vibrationMs ?? DEFAULT_HANDLE_PULSE_MS
+            if (duration > 0) {
+                try { navigator.vibrate?.(duration) } catch { /* Keep word selection available. */ }
+            }
+        }
         if (selection) syncSelectionTransform(selection)
         positionSelectorMenuForSelection()
     })
