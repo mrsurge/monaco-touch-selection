@@ -1155,6 +1155,7 @@ const attachTouchSelectionView = (
                     const moved = event.changedTouches[0] ?? event.touches[0] ?? touch
                     if (touch.clientX !== moved.clientX || touch.clientY !== moved.clientY) fingerMovedSinceSample = true
                     touch = moved
+                    lens?.move(touch.clientX + touchOffsetX)
                     touchMoved = true
                     moveCount += 1
                     latestMoveAt = performance.now()

@@ -10,12 +10,29 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
     const selectionLayer = document.createElement('div')
     const caret = document.createElement('div')
     caret.className = 'monaco-touch-lens-caret'
-    lens.append(selectionLayer, sample, caret)
+    const neighbors = [-1, 1].map(() => sample.cloneNode(false) as HTMLDivElement)
+    const scene = document.createElement('div')
+    scene.style.cssText = 'position:absolute;inset:0'
+    scene.append(selectionLayer, ...neighbors, sample, caret)
+    lens.append(scene)
     let frame = 0
-    let previous: Node | null = null
+    const sources = new WeakMap<HTMLElement, Node | null>()
     let latest: IPosition
     let fingerY = 0
+    let fingerX = 0
+    let caretClientX = 0
+    let editorScaleX = 1
+    let placement: 'above' | 'below' | undefined
     const scale = 1.65
+    function pan() {
+        // The scene is painted relative to the snapped caret. Translate the
+        // whole scene so the continuous virtual touch point is at lens center.
+        scene.style.transform = `translateX(${(caretClientX - fingerX) * scale / editorScaleX}px)`
+        const viewport = window.visualViewport
+        const left = viewport?.offsetLeft ?? 0
+        lens.style.left = Math.max(left, Math.min(fingerX - lens.offsetWidth / 2,
+            left + (viewport?.width ?? window.innerWidth) - lens.offsetWidth)) + 'px'
+    }
     function paint() {
         frame = 0
         const pos = control.getScrolledVisiblePosition(latest)
@@ -23,7 +40,8 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
         if (!pos || !box.width || !box.height) { lens.hidden = true; return }
         const sx = box.width / host.offsetWidth, sy = box.height / host.offsetHeight
         const y = box.top + (pos.top + pos.height / 2) * sy
-        const row = [...host.querySelectorAll<HTMLElement>('.view-lines > .view-line')].find(line => {
+        const rows = [...host.querySelectorAll<HTMLElement>('.view-lines > .view-line')]
+        const row = rows.find(line => {
             const r = line.getBoundingClientRect()
             return y >= r.top && y < r.bottom
         })
@@ -38,13 +56,31 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
         }
         lens.hidden = false
         const shape = control.getRawOptions().cursorStyle ?? 'line'
-        if (row.firstChild !== previous || caret.dataset.shape !== shape) {
-            sample.replaceChildren(...Array.from(row.childNodes, n => n.cloneNode(true)))
+        const anchorX = box.left + pos.left * sx
+        caretClientX = anchorX
+        editorScaleX = sx
+        const anchorRect = row.getBoundingClientRect()
+        const center = (anchorRect.top + anchorRect.bottom) / 2
+        lens.style.height = Math.ceil(pos.height * scale * 1.65) + 'px'
+        const visibleRows = [row, ...[-1, 1].map(direction => rows.find(candidate => {
+            const rect = candidate.getBoundingClientRect()
+            const edge = direction < 0 ? anchorRect.top - 0.5 : anchorRect.bottom + 0.5
+            return edge >= rect.top && edge < rect.bottom
+        }))]
+        for (const [index, target] of [sample, ...neighbors].entries()) {
+            const source = visibleRows[index]
+            target.hidden = !source
+            if (!source) continue
+            const rect = source.getBoundingClientRect()
+            target.style.top = `calc(50% + ${((rect.top + rect.bottom) / 2 - center) / sy * scale}px)`
+            target.style.transform = `translate(${(rect.left - anchorX) / sx * scale}px,-50%) scale(${scale})`
+            if (sources.get(target) === source.firstChild && (index !== 0 || caret.dataset.shape === shape)) continue
+            target.replaceChildren(...Array.from(source.childNodes, n => n.cloneNode(true)))
             // The copy lives outside .view-lines, so Monaco's descendant rules
             // no longer apply. Copy longhands: Chromium can return an empty
             // computed font shorthand even when every font metric is resolved.
-            const originals = [row, ...row.querySelectorAll<HTMLElement>('span')]
-            const copies = [sample, ...sample.querySelectorAll<HTMLElement>('span')]
+            const originals = [source, ...source.querySelectorAll<HTMLElement>('span')]
+            const copies = [target, ...target.querySelectorAll<HTMLElement>('span')]
             for (const [i, original] of originals.entries()) {
                 const style = getComputedStyle(original)
                 for (const property of ['font-family', 'font-size', 'font-weight', 'font-style',
@@ -53,13 +89,12 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
                     copies[i].style.setProperty(property, style.getPropertyValue(property))
                 }
             }
-            previous = row.firstChild
+            sources.set(target, source.firstChild)
+            if (index !== 0) continue
             caret.replaceChildren()
             if (shape === 'block') caret.append(sample.cloneNode(true))
             caret.dataset.shape = shape
         }
-        const offset = pos.left - (row.getBoundingClientRect().left - box.left) / sx
-        sample.style.transform = `translate(${-offset * scale}px,-50%) scale(${scale})`
         const next = control.getScrolledVisiblePosition({ lineNumber: latest.lineNumber, column: latest.column + 1 })
         const cell = next && next.top === pos.top && next.left > pos.left
             ? next.left - pos.left : Number.parseFloat(getComputedStyle(row).fontSize) * 0.6
@@ -70,32 +105,39 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
         selectionLayer.replaceChildren()
         const selection = control.getSelection()
         if (selection && !selection.isEmpty()) {
-            const anchorX = box.left + pos.left * sx
             for (const segment of host.querySelectorAll<HTMLElement>('.view-overlays .selected-text')) {
                 // Monaco paints a filler followed by a background mask to round
                 // an interior corner. Only the actual selected ranges belong in the lens.
                 if (segment.nextElementSibling?.matches('.cslr.monaco-editor-background')) continue
                 const rect = segment.getBoundingClientRect()
-                if (y < rect.top || y >= rect.bottom) continue
+                const dy = ((rect.top + rect.bottom) / 2 - center) / sy * scale
+                if (Math.abs(dy) > (lens.offsetHeight + rect.height / sy * scale) / 2) continue
                 const mark = document.createElement('div')
                 mark.className = 'monaco-touch-lens-selection'
                 mark.style.left = `calc(50% + ${(rect.left - anchorX) / sx * scale}px)`
                 mark.style.width = rect.width / sx * scale + 'px'
-                mark.style.height = pos.height * scale + 'px'
+                mark.style.top = `calc(50% + ${dy}px)`
+                mark.style.height = rect.height / sy * scale + 'px'
                 mark.style.backgroundColor = getComputedStyle(segment).backgroundColor
                 selectionLayer.append(mark)
             }
         }
         const viewport = window.visualViewport
-        const left = viewport?.offsetLeft ?? 0, top = viewport?.offsetTop ?? 0
-        const right = left + (viewport?.width ?? window.innerWidth)
+        const top = viewport?.offsetTop ?? 0
         const bottom = top + (viewport?.height ?? window.innerHeight)
-        const x = box.left + pos.left * sx - lens.offsetWidth / 2
         const above = box.top + pos.top * sy - lens.offsetHeight - 12
-        lens.style.left = Math.max(left, Math.min(x, right - lens.offsetWidth)) + 'px'
+        pan()
+        const nextPlacement = above >= top ? 'above' : 'below'
+        lens.style.transition = placement === nextPlacement && !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+            ? 'top 80ms ease-out' : 'none'
+        placement = nextPlacement
         lens.style.top = Math.max(top, Math.min(above >= top ? above : fingerY + 24, bottom - lens.offsetHeight)) + 'px'
     }
     return {
+        move(clientX: number) {
+            fingerX = clientX
+            if (lens.isConnected) pan()
+        },
         update(position: IPosition, clientY: number) {
             latest = position
             fingerY = clientY
