@@ -29,6 +29,7 @@ const OPTION_LineHeight_FALLBACK = 67
 const DEFAULT_SELECTION_SYNC_TIMEOUT = 300
 const DOUBLE_TAP_HANDLE_DELAY = 450
 const DEFAULT_HANDLE_PULSE_MS = 1
+const menuIcon = (path: string) => `<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="${path}"/></svg>`
 const REVEAL_INTERVAL = 50
 const HANDLE_IDLE_MS = 75
 const TOUCH_CONTEXT_MENU_WINDOW = 2000
@@ -1496,7 +1497,7 @@ const attachTouchSelectionView = (
             }],
             [DefaultToolName.Hover, {
                 name: 'hover',
-                innerHTML: `<span class="icon" style="font-size: 1.2em; line-height: 1;">🚁</span>`,
+                innerHTML: menuIcon('M3 3l5 15 3-6 6-3z M15 15l5 5'),
                 action: () => {
                     hideSelectorMenu()
                     const sel = editor.getSelection()
@@ -1514,7 +1515,7 @@ const attachTouchSelectionView = (
             }],
             [DefaultToolName.Find, {
                 name: 'find',
-                innerHTML: `<span class="icon" style="font-size: 1.2em; line-height: 1;">🔎</span>`,
+                innerHTML: menuIcon('M10 3a7 7 0 1 0 0 14 7 7 0 1 0 0-14z M15 15l6 6'),
                 action: () => {
                     hideSelectorMenu()
                     const act = editor.getAction('actions.find')
@@ -1544,7 +1545,7 @@ const attachTouchSelectionView = (
             }],
             [DefaultToolName.Mention, {
                 name: 'mention',
-                innerHTML: `<span class="icon" style="font-size: 1.2em; line-height: 1;">💬</span>`,
+                innerHTML: menuIcon('M3 4h18v13H9l-6 4z M7 9h10 M7 13h6'),
                 action: () => {
                     hideSelectorMenu()
                     try {
