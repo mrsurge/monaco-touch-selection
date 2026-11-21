@@ -25,6 +25,7 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
     let editorScaleX = 1
     let placement: 'above' | 'below' | undefined
     const scale = 1.65
+    let fontCopyFactor = 1
     function pan() {
         // The scene is painted relative to the snapped caret. Translate the
         // whole scene so the continuous virtual touch point is at lens center.
@@ -54,6 +55,15 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
                 lens.style.setProperty(name, theme.getPropertyValue(name))
             }
             document.documentElement.append(lens)
+            // Some Android hosts report an already scaled computed font-size,
+            // then apply their text scale again to an explicit px declaration.
+            // Measure that conversion in the lens once, not on each drag frame.
+            const probe = document.createElement('span')
+            probe.style.fontSize = '100px'
+            sample.append(probe)
+            const effective = Number.parseFloat(getComputedStyle(probe).fontSize)
+            if (Number.isFinite(effective) && effective > 0) fontCopyFactor = 100 / effective
+            probe.remove()
         }
         lens.hidden = false
         const shape = control.getRawOptions().cursorStyle ?? 'line'
@@ -84,10 +94,19 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
             const copies = [target, ...target.querySelectorAll<HTMLElement>('span')]
             for (const [i, original] of originals.entries()) {
                 const style = getComputedStyle(original)
+                if (original.classList.contains('te2-inlay-cursor-stop')) {
+                    copies[i].style.backgroundColor = style.backgroundColor
+                    copies[i].style.borderRadius = style.borderRadius
+                    copies[i].style.padding = style.padding
+                    copies[i].style.display = style.display
+                    if (style.display === 'inline-block') copies[i].style.width = style.width
+                }
                 for (const property of ['font-family', 'font-size', 'font-weight', 'font-style',
                     'font-stretch', 'font-feature-settings', 'font-variation-settings', 'font-kerning',
                     'font-variant-ligatures', 'letter-spacing', 'word-spacing', 'line-height', 'tab-size', 'color']) {
-                    copies[i].style.setProperty(property, style.getPropertyValue(property))
+                    const value = style.getPropertyValue(property)
+                    copies[i].style.setProperty(property, property === 'font-size' && fontCopyFactor !== 1
+                        ? Number.parseFloat(value) * fontCopyFactor + 'px' : value)
                 }
             }
             sources.set(target, source.firstChild)
@@ -108,20 +127,21 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
         selectionLayer.replaceChildren()
         const selection = control.getSelection()
         if (selection && !selection.isEmpty()) {
-            for (const segment of host.querySelectorAll<HTMLElement>('.view-overlays .selected-text')) {
-                // Monaco paints a filler followed by a background mask to round
-                // an interior corner. Only the actual selected ranges belong in the lens.
-                if (segment.nextElementSibling?.matches('.cslr.monaco-editor-background')) continue
+            for (const segment of host.querySelectorAll<HTMLElement>('.view-overlays .selected-text, .view-overlays .selected-text + .cslr.monaco-editor-background')) {
                 const rect = segment.getBoundingClientRect()
                 const dy = ((rect.top + rect.bottom) / 2 - center) / sy * scale
                 if (Math.abs(dy) > (lens.offsetHeight + rect.height / sy * scale) / 2) continue
                 const mark = document.createElement('div')
                 mark.className = 'monaco-touch-lens-selection'
                 mark.style.left = `calc(50% + ${(rect.left - anchorX) / sx * scale}px)`
-                mark.style.width = rect.width / sx * scale + 'px'
+                mark.style.width = rect.width / sx + 'px'
                 mark.style.top = `calc(50% + ${dy}px)`
-                mark.style.height = rect.height / sy * scale + 'px'
-                mark.style.backgroundColor = getComputedStyle(segment).backgroundColor
+                mark.style.height = rect.height / sy + 'px'
+                mark.style.transformOrigin = 'left center'
+                mark.style.transform = `translateY(-50%) scale(${scale})`
+                const paint = getComputedStyle(segment)
+                mark.style.backgroundColor = paint.backgroundColor
+                mark.style.borderRadius = paint.borderRadius
                 selectionLayer.append(mark)
             }
         }
