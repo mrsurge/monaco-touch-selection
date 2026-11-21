@@ -22,6 +22,7 @@ export {
 
 type ICodeEditor = editor.ICodeEditor;
 import { createSelectionLens } from './selection-lens.js'
+import {hintRuns,touchCoords} from './inlay-geometry.js'
 
 const OPTION_FontSize_FALLBACK = 52
 const OPTION_LineHeight_FALLBACK = 67
@@ -614,7 +615,12 @@ const attachTouchSelectionView = (
         const maxColumn = model.getLineMaxColumn(lineNumber)
         const layout = editor.getLayoutInfo()
         const editorRect = element.getBoundingClientRect()
-        const targetOffset = clientX - editorRect.left - layout.contentLeft + editor.getScrollLeft()
+        const sx = (element.offsetWidth && editorRect.width / element.offsetWidth) || 1
+        const targetOffset = (clientX - editorRect.left) / sx - layout.contentLeft + editor.getScrollLeft()
+        const runs = hintRuns(editor, element, lineNumber, clientY)
+        for (const [column, run] of runs) {
+            if (clientX >= run.left && clientX <= run.right) return {lineNumber, column}
+        }
         const geometry = debugEnabled ? {
             editorRect: describeDebugRect(editorRect),
             contentLeft: layout.contentLeft,
@@ -692,7 +698,11 @@ const attachTouchSelectionView = (
                 return target.position
             }
 
-            const column = Math.abs(targetOffset - leftOffset) <= Math.abs(rightOffset - targetOffset)
+            const distance = (column: number, offset: number) => {
+                const run = runs.get(column)
+                return run ? Math.max(run.left-clientX,clientX-run.right,0)/sx : Math.abs(targetOffset-offset)
+            }
+            const column = distance(leftColumn,leftOffset) <= distance(rightColumn,rightOffset)
                 ? leftColumn
                 : rightColumn
             const position = {lineNumber, column}
@@ -806,8 +816,9 @@ const attachTouchSelectionView = (
         // Get the position of the start and end of the selection in client coordinates
         const scrollLeft = editor.getScrollLeft()
         const scrollTop = editor.getScrollTop()
-        const startCoords = editor.getScrolledVisiblePosition(startPosition)
-        const endCoords = editor.getScrolledVisiblePosition(endPosition)
+        const startCoords = touchCoords(editor,startPosition)
+        const endCoords = startPosition.column === endPosition.column && startPosition.lineNumber === endPosition.lineNumber
+            ? startCoords : touchCoords(editor,endPosition)
 
         if (!startCoords || !endCoords) return
 
@@ -996,7 +1007,7 @@ const attachTouchSelectionView = (
                     const anchorPos = selector.classList.contains('left')
                         ? {lineNumber: initialSelection.startLineNumber, column: initialSelection.startColumn}
                         : {lineNumber: initialSelection.endLineNumber, column: initialSelection.endColumn}
-                    const scrolledPos = editor.getScrolledVisiblePosition(anchorPos)
+                    const scrolledPos = touchCoords(editor,anchorPos)
                     if (scrolledPos) {
                         const editorRect = element.getBoundingClientRect()
                         const sx = element.offsetWidth ? editorRect.width / element.offsetWidth : 1

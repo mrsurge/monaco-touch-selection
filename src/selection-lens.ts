@@ -1,4 +1,5 @@
 import type { editor, IPosition } from 'monaco-editor/esm/vs/editor/editor.api.js'
+import {touchCoords, hintRuns} from './inlay-geometry.js'
 
 /** Sample the rendered view line so wrapping, token widths and tabs match Monaco. */
 export function createSelectionLens(control: editor.ICodeEditor, host: HTMLElement) {
@@ -35,7 +36,7 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
     }
     function paint() {
         frame = 0
-        const pos = control.getScrolledVisiblePosition(latest)
+        const pos = touchCoords(control,latest)
         const box = host.getBoundingClientRect()
         if (!pos || !box.width || !box.height) { lens.hidden = true; return }
         const sx = box.width / host.offsetWidth, sy = box.height / host.offsetHeight
@@ -96,8 +97,10 @@ export function createSelectionLens(control: editor.ICodeEditor, host: HTMLEleme
             caret.dataset.shape = shape
         }
         const next = control.getScrolledVisiblePosition({ lineNumber: latest.lineNumber, column: latest.column + 1 })
-        const cell = next && next.top === pos.top && next.left > pos.left
-            ? next.left - pos.left : Number.parseFloat(getComputedStyle(row).fontSize) * 0.6
+        const nextHint = hintRuns(control,host,latest.lineNumber,y).get(latest.column+1)
+        const nextLeft = nextHint ? (nextHint.left-box.left)/sx : next?.left
+        const cell = next && next.top === pos.top && nextLeft !== undefined && nextLeft > pos.left
+            ? nextLeft - pos.left : Number.parseFloat(getComputedStyle(row).fontSize) * 0.6
         caret.style.width = (shape.startsWith('block') ? cell : (control.getRawOptions().cursorWidth || 2)) * scale + 'px'
         caret.style.height = pos.height * scale + 'px'
         const glyph = caret.firstElementChild
